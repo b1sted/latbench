@@ -143,6 +143,16 @@ bool pal_pin_supported(void)
     return true;
 }
 
+bool pal_ilp_scaling_expected(void)
+{
+#if defined(__arm__) && !defined(__aarch64__)
+    /* Cortex-A7 and other in-order ARMv7 cores expose one integer pipeline. */
+    return false;
+#else
+    return true;
+#endif
+}
+
 pal_mem_t *pal_mem_alloc(size_t size, uint32_t flags)
 {
     pal_mem_t *mem = NULL;
