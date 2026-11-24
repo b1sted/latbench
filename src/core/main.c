@@ -772,6 +772,7 @@ int main(int argc, char **argv)
     cfg.fast = false;
     cfg.auto_mode = false;
     cfg.quiet = false;
+    cfg.runtime_applied = false;
     cfg.os_ctx_mode = LB_OS_CTX_BOTH;
 
     status = parse_args(argc, argv, &cfg, &show_help, &show_version, &module_name, &subtest_name);

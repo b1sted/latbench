@@ -58,10 +58,9 @@
 #define CORE_STLF_REPEATS 3u
 #define CORE_STLF_CASES 5u
 
-/* Compact auto mode: fewer iterations and smaller arenas. */
+/* Compact auto mode: fewer iterations and repeats; the arena stays above L3. */
 #define CORE_FAST_REPEATS 2u
 #define CORE_ILP_FAST_ITERATIONS UINT64_C(1000000)
-#define CORE_MLP_FAST_MAX_BYTES (UINT64_C(8) * UINT64_C(1024) * UINT64_C(1024))
 #define CORE_MLP_FAST_ITERATIONS UINT64_C(65536)
 #define CORE_ALIGN_FAST_ITERATIONS UINT64_C(1000000)
 #define CORE_STLF_FAST_ITERATIONS UINT64_C(1000000)
@@ -132,6 +131,10 @@ static uint32_t core_arena_flags(const lb_cfg_t *cfg)
 
 static void core_apply_runtime(const lb_cfg_t *cfg)
 {
+    if (cfg->runtime_applied) {
+        return;
+    }
+
     if (cfg->cpu_id >= 0) {
         if (pal_pin_cpu(cfg->cpu_id) != LB_STATUS_OK) {
             tty_warn("CPU pinning to %" PRId32 " was not applied", cfg->cpu_id);
@@ -574,8 +577,7 @@ lb_status_t core_mlp_run(const lb_cfg_t *cfg)
 
     core_apply_runtime(cfg);
 
-    arena_bytes =
-        core_arena_cap(cfg, cfg->fast ? CORE_MLP_FAST_MAX_BYTES : CORE_MLP_MAX_BYTES, true);
+    arena_bytes = core_arena_cap(cfg, CORE_MLP_MAX_BYTES, true);
     if (arena_bytes < CORE_MIN_ARENA_BYTES) {
         tty_err("memory budget is too small for core mlp");
         return LB_STATUS_NOMEM;
