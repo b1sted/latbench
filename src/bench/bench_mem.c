@@ -93,9 +93,15 @@
 #define MEM_PREFETCH_REPEATS 3u
 #define MEM_PREFETCH_CASES 5u
 
+/*
+ * The 64-bit payload comes first so the pointer that follows it never needs
+ * implicit alignment padding. On 32-bit ARM, placing the pointer first would
+ * insert four bytes before the uint64_t and grow the node to 72 bytes, while
+ * the arena and index arrays are sized in 64-byte units.
+ */
 typedef struct mem_node_t {
-    struct mem_node_t *next;
     uint64_t payload;
+    struct mem_node_t *next;
     /* Structural padding: fixes the node stride at one cache line. */
     uint8_t pad[MEM_NODE_PAD]; /* cppcheck-suppress unusedStructMember */
 } mem_node_t;
