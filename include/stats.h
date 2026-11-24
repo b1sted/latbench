@@ -28,6 +28,21 @@
 typedef struct stats_series_t stats_series_t;
 
 /*
+ * Read-only summary of one series point. Percentiles are computed over the raw
+ * samples of that point, so renderers can show a stable distribution without
+ * exposing the internal sample storage.
+ */
+typedef struct stats_point_summary_t {
+    size_t x;            /* working-set size at this point */
+    size_t sample_count; /* number of raw samples behind the summary */
+    double min_ns;       /* smallest sample */
+    double p10_ns;       /* 10th percentile, used by the step detector */
+    double p50_ns;       /* median */
+    double p90_ns;       /* 90th percentile */
+    double p99_ns;       /* 99th percentile */
+} stats_point_summary_t;
+
+/*
  * One detected latency step. The threshold is estimated between the last point
  * of the lower plateau and the first point of the upper plateau.
  */
@@ -68,6 +83,15 @@ const char *stats_series_label(const stats_series_t *series);
 
 /* Number of points in the series, or zero when series is NULL. */
 size_t stats_series_count(const stats_series_t *series);
+
+/*
+ * Summarise one point by index. The percentile values use the same rank rule
+ * as stats_percentile(). Returns LB_STATUS_INVALID_ARG for NULL inputs or an
+ * out-of-range index, and LB_STATUS_NOMEM when the temporary sort buffer cannot
+ * be allocated.
+ */
+lb_status_t stats_series_summary(const stats_series_t *series, size_t index,
+                                 stats_point_summary_t *out);
 
 /*
  * Detect latency steps in a series. Each point is reduced to its 10th

@@ -290,10 +290,48 @@ void stats_series_free(stats_series_t *series)
     free(series);
 }
 
+static double stats_percentile_sorted(const double *sorted, size_t count, double pct)
+{
+    double clamped = pct;
+
+    if (sorted == NULL || count == 0u) {
+        return 0.0;
+    }
+
+    /* The negated comparison also maps NaN to the low end. */
+    if (!(clamped >= 0.0)) {
+        clamped = 0.0;
+    }
+    if (clamped > 100.0) {
+        clamped = 100.0;
+    }
+
+    if (clamped <= 0.0) {
+        return sorted[0];
+    }
+    if (clamped >= 100.0) {
+        return sorted[count - 1u];
+    }
+
+    {
+        const double rank_value = (clamped / 100.0) * (double)count;
+        size_t rank = (size_t)rank_value;
+        size_t index = 0u;
+
+        if ((double)rank < rank_value) {
+            rank++;
+        }
+        index = (rank == 0u) ? 0u : rank - 1u;
+        if (index >= count) {
+            index = count - 1u;
+        }
+        return sorted[index];
+    }
+}
+
 double stats_percentile(const double *samples, size_t count, double pct)
 {
     double *sorted = NULL;
-    double clamped = pct;
     double result = 0.0;
 
     if (samples == NULL || count == 0u) {
@@ -310,35 +348,43 @@ double stats_percentile(const double *samples, size_t count, double pct)
     (void)memcpy(sorted, samples, count * sizeof(*sorted));
     qsort(sorted, count, sizeof(*sorted), stats_compare_double);
 
-    /* The negated comparison also maps NaN to the low end. */
-    if (!(clamped >= 0.0)) {
-        clamped = 0.0;
-    }
-    if (clamped > 100.0) {
-        clamped = 100.0;
-    }
-
-    if (clamped <= 0.0) {
-        result = sorted[0];
-    } else if (clamped >= 100.0) {
-        result = sorted[count - 1u];
-    } else {
-        const double rank_value = (clamped / 100.0) * (double)count;
-        size_t rank = (size_t)rank_value;
-        size_t index = 0u;
-
-        if ((double)rank < rank_value) {
-            rank++;
-        }
-        index = (rank == 0u) ? 0u : rank - 1u;
-        if (index >= count) {
-            index = count - 1u;
-        }
-        result = sorted[index];
-    }
-
+    result = stats_percentile_sorted(sorted, count, pct);
     free(sorted);
     return result;
+}
+
+lb_status_t stats_series_summary(const stats_series_t *series, size_t index,
+                                 stats_point_summary_t *out)
+{
+    const struct stats_point_t *point = NULL;
+    double *sorted = NULL;
+
+    if (series == NULL || out == NULL || index >= series->count) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    point = &series->points[index];
+    if (point->count > SIZE_MAX / sizeof(*sorted)) {
+        return LB_STATUS_NOMEM;
+    }
+
+    sorted = malloc(point->count * sizeof(*sorted));
+    if (sorted == NULL) {
+        return LB_STATUS_NOMEM;
+    }
+    (void)memcpy(sorted, point->samples, point->count * sizeof(*sorted));
+    qsort(sorted, point->count, sizeof(*sorted), stats_compare_double);
+
+    out->x = point->x;
+    out->sample_count = point->count;
+    out->min_ns = sorted[0];
+    out->p10_ns = stats_percentile_sorted(sorted, point->count, STATS_NOISE_PERCENTILE);
+    out->p50_ns = stats_percentile_sorted(sorted, point->count, 50.0);
+    out->p90_ns = stats_percentile_sorted(sorted, point->count, 90.0);
+    out->p99_ns = stats_percentile_sorted(sorted, point->count, 99.0);
+
+    free(sorted);
+    return LB_STATUS_OK;
 }
 
 lb_status_t stats_smooth_median3(const double *samples, size_t count, double *out)

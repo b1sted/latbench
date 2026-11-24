@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "pal/pal.h"
 #include "types.h"
@@ -24,8 +25,15 @@
 #define TTY_NS_PER_MS (TTY_NS_PER_US * UINT64_C(1000))
 #define TTY_NS_PER_S (TTY_NS_PER_MS * UINT64_C(1000))
 
+/* Keep plots inside the width of a classic 80-column terminal. */
+#define TTY_PLOT_WIDTH 76u
+#define TTY_PLOT_BAR_WIDTH 20u
+#define TTY_PLOT_FIELD_WIDTH 10
+#define TTY_DRIFT_WARN_PCT 10.0
+
 static bool g_tty_section_started = false;
 static bool g_tty_no_color = false;
+static bool g_tty_csv_series_header = false;
 
 static FILE *tty_info_stream(const lb_cfg_t *cfg)
 {
@@ -202,6 +210,18 @@ void tty_err(const char *fmt, ...)
     va_end(args);
 }
 
+void tty_warn_drift(double drift_pct)
+{
+    double magnitude = drift_pct;
+
+    if (magnitude < 0.0) {
+        magnitude = -magnitude;
+    }
+    if (magnitude > TTY_DRIFT_WARN_PCT) {
+        tty_warn("frequency drift %+.1f%% exceeds %.0f%%", drift_pct, TTY_DRIFT_WARN_PCT);
+    }
+}
+
 static void tty_format_scaled(uint64_t bytes, uint64_t unit, const char *suffix, char *out,
                               size_t capacity)
 {
@@ -246,4 +266,275 @@ const char *tty_format_ns(uint64_t ns, char *out, size_t capacity)
         (void)snprintf(out, capacity, "%" PRIu64 " ns", ns);
     }
     return out;
+}
+
+/*
+ * Small log2 approximation for bar placement. A linear interpolation of the
+ * mantissa is accurate enough for a twenty-cell display and keeps the renderer
+ * free of a libm dependency.
+ */
+static double tty_log2_approx(double value)
+{
+    int exponent = 0;
+    double mantissa = value;
+
+    if (!(mantissa > 0.0)) {
+        return 0.0;
+    }
+    while (mantissa >= 2.0) {
+        mantissa *= 0.5;
+        exponent++;
+    }
+    while (mantissa < 1.0) {
+        mantissa *= 2.0;
+        exponent--;
+    }
+    return (double)exponent + (mantissa - 1.0);
+}
+
+static size_t tty_bar_length(double value, double min_value, double max_value, size_t width)
+{
+    double low = 0.0;
+    double high = 0.0;
+    double position = 0.0;
+    size_t filled = 0u;
+
+    if (width == 0u) {
+        return 0u;
+    }
+    if (!(max_value > min_value)) {
+        return width / 2u;
+    }
+
+    low = tty_log2_approx(min_value);
+    high = tty_log2_approx(max_value);
+    if (!(high > low)) {
+        return width / 2u;
+    }
+
+    position = (tty_log2_approx(value) - low) / (high - low);
+    if (!(position > 0.0)) {
+        position = 0.0;
+    }
+    if (position > 1.0) {
+        position = 1.0;
+    }
+
+    if (width == 1u) {
+        return 1u;
+    }
+
+    /* Keep the smallest value visible as a one-cell baseline. */
+    filled = 1u + (size_t)((position * (double)(width - 1u)) + 0.5);
+    if (filled > width) {
+        filled = width;
+    }
+    return filled;
+}
+
+static const char *tty_format_bar(double value, double min_value, double max_value, char *out,
+                                  size_t capacity)
+{
+    size_t filled = 0u;
+    size_t i = 0u;
+
+    if (out == NULL || capacity == 0u) {
+        return "";
+    }
+
+    filled = tty_bar_length(value, min_value, max_value, TTY_PLOT_BAR_WIDTH);
+    if (filled >= capacity) {
+        filled = capacity - 1u;
+    }
+    for (i = 0u; i < filled; i++) {
+        out[i] = '#';
+    }
+    out[filled] = '\0';
+    return out;
+}
+
+static const char *tty_threshold_name(const char *const *level_names, size_t level_name_count,
+                                      size_t index, char *fallback, size_t capacity)
+{
+    if (level_names != NULL && index < level_name_count && level_names[index] != NULL) {
+        return level_names[index];
+    }
+
+    (void)snprintf(fallback, capacity, "step %zu", index + 1u);
+    return fallback;
+}
+
+static void tty_print_thresholds(const lb_cfg_t *cfg, const stats_steps_t *steps,
+                                 const char *const *level_names, size_t level_name_count)
+{
+    char list[LB_CSV_MAX] = {0};
+    char size[LB_NAME_MAX] = {0};
+    char fallback[LB_NAME_MAX] = {0};
+    size_t used = 0u;
+    size_t i = 0u;
+    bool fits = true;
+
+    if (steps == NULL || steps->count == 0u) {
+        tty_header(cfg, "Estimated thresholds: none detected");
+        return;
+    }
+
+    for (i = 0u; i < steps->count && i < STATS_MAX_STEPS; i++) {
+        const char *name =
+            tty_threshold_name(level_names, level_name_count, i, fallback, sizeof(fallback));
+        int written = 0;
+
+        (void)tty_format_bytes((uint64_t)steps->items[i].x, size, sizeof(size));
+        written = snprintf(list + used, sizeof(list) - used, "%s~%s (%s)", (i == 0u) ? "" : ", ",
+                           size, name);
+        if (written < 0 || (size_t)written >= (sizeof(list) - used)) {
+            fits = false;
+            break;
+        }
+        used += (size_t)written;
+    }
+
+    if (fits && ((strlen("Estimated thresholds: ") + used) <= TTY_PLOT_WIDTH)) {
+        tty_header(cfg, "Estimated thresholds: %s", list);
+        return;
+    }
+
+    tty_header(cfg, "Estimated thresholds:");
+    for (i = 0u; i < steps->count && i < STATS_MAX_STEPS; i++) {
+        const char *name =
+            tty_threshold_name(level_names, level_name_count, i, fallback, sizeof(fallback));
+
+        (void)tty_format_bytes((uint64_t)steps->items[i].x, size, sizeof(size));
+        tty_header(cfg, "  ~%s (%s)", size, name);
+    }
+}
+
+static void tty_csv_field(const char *text, char *out, size_t capacity)
+{
+    size_t i = 0u;
+
+    if (out == NULL || capacity == 0u) {
+        return;
+    }
+    if (text == NULL) {
+        out[0] = '\0';
+        return;
+    }
+
+    while (text[i] != '\0' && (i + 1u) < capacity) {
+        const char c = text[i];
+
+        out[i] = (c == ',' || c == '\n' || c == '\r') ? '_' : c;
+        i++;
+    }
+    out[i] = '\0';
+}
+
+lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
+                            const stats_steps_t *steps, const char *const *level_names,
+                            size_t level_name_count)
+{
+    const char *label = NULL;
+    stats_point_summary_t *summaries = NULL;
+    char label_field[LB_NAME_MAX] = {0};
+    size_t count = 0u;
+    lb_status_t status = LB_STATUS_OK;
+
+    if (series == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    label = stats_series_label(series);
+    if (label == NULL || label[0] == '\0') {
+        label = "series";
+    }
+    tty_csv_field(label, label_field, sizeof(label_field));
+
+    count = stats_series_count(series);
+    if (count > 0u) {
+        if (count > SIZE_MAX / sizeof(*summaries)) {
+            return LB_STATUS_NOMEM;
+        }
+        summaries = malloc(count * sizeof(*summaries));
+        if (summaries == NULL) {
+            return LB_STATUS_NOMEM;
+        }
+
+        for (size_t i = 0u; i < count; i++) {
+            status = stats_series_summary(series, i, &summaries[i]);
+            if (status != LB_STATUS_OK) {
+                goto cleanup;
+            }
+        }
+    }
+
+    tty_section(cfg, label);
+
+    if (cfg != NULL && cfg->csv) {
+        if (!g_tty_csv_series_header) {
+            tty_csv_row(cfg, "test,x,p10_ns,min_ns,p50_ns,p90_ns,p99_ns,samples");
+            g_tty_csv_series_header = true;
+        }
+        for (size_t i = 0u; i < count; i++) {
+            tty_csv_row(cfg, "%s,%zu,%.2f,%.2f,%.2f,%.2f,%.2f,%zu", label_field, summaries[i].x,
+                        summaries[i].p10_ns, summaries[i].min_ns, summaries[i].p50_ns,
+                        summaries[i].p90_ns, summaries[i].p99_ns, summaries[i].sample_count);
+        }
+    } else if (count == 0u) {
+        tty_header(cfg, "  (no points)");
+    } else {
+        char header[LB_LINE_MAX] = {0};
+        double min_value = 0.0;
+        double max_value = 0.0;
+        bool have_value = false;
+
+        for (size_t i = 0u; i < count; i++) {
+            const double value = summaries[i].p10_ns;
+
+            if (!(value > 0.0)) {
+                continue;
+            }
+            if (!have_value || value < min_value) {
+                min_value = value;
+            }
+            if (!have_value || value > max_value) {
+                max_value = value;
+            }
+            have_value = true;
+        }
+
+        (void)snprintf(header, sizeof(header), "  %*s %*s %*s %*s  %s", TTY_PLOT_FIELD_WIDTH,
+                       "Size", TTY_PLOT_FIELD_WIDTH, "p10 ns", TTY_PLOT_FIELD_WIDTH, "p50 ns",
+                       TTY_PLOT_FIELD_WIDTH, "p90 ns", "Latency (log)");
+        tty_header(cfg, "%s", header);
+
+        for (size_t i = 0u; i < count; i++) {
+            char size[32] = {0};
+            char p10[32] = {0};
+            char p50[32] = {0};
+            char p90[32] = {0};
+            char bar[TTY_PLOT_BAR_WIDTH + 1u] = {0};
+            char line[LB_LINE_MAX] = {0};
+
+            (void)tty_format_bytes((uint64_t)summaries[i].x, size, sizeof(size));
+            (void)snprintf(p10, sizeof(p10), "%.4g", summaries[i].p10_ns);
+            (void)snprintf(p50, sizeof(p50), "%.4g", summaries[i].p50_ns);
+            (void)snprintf(p90, sizeof(p90), "%.4g", summaries[i].p90_ns);
+            if (have_value) {
+                (void)tty_format_bar(summaries[i].p10_ns, min_value, max_value, bar, sizeof(bar));
+            }
+
+            (void)snprintf(line, sizeof(line), "  %*s %*s %*s %*s  %s", TTY_PLOT_FIELD_WIDTH, size,
+                           TTY_PLOT_FIELD_WIDTH, p10, TTY_PLOT_FIELD_WIDTH, p50,
+                           TTY_PLOT_FIELD_WIDTH, p90, bar);
+            tty_header(cfg, "%s", line);
+        }
+    }
+
+    tty_print_thresholds(cfg, steps, level_names, level_name_count);
+    status = LB_STATUS_OK;
+
+cleanup:
+    free(summaries);
+    return status;
 }

@@ -75,7 +75,7 @@ LEAKS_BIN := $(BIN_DIR)/latbench-asan
 PLATFORM_RELEASE_OBJS := $(PLATFORM_SRCS:%.c=$(RELEASE_OBJDIR)/%.o)
 PLATFORM_LEAKS_OBJS := $(PLATFORM_SRCS:%.c=$(LEAKS_OBJDIR)/%.o)
 
-TEST_SRCS := tests/core/test_stats.c tests/core/test_util.c \
+TEST_SRCS := tests/core/test_stats.c tests/core/test_tty.c tests/core/test_util.c \
 	$(wildcard tests/platform/test_*.c)
 TEST_RELEASE_OBJS := $(patsubst tests/%.c,$(TEST_OBJDIR)/rel/tests/%.o,$(TEST_SRCS))
 TEST_LEAKS_OBJS := $(patsubst tests/%.c,$(LEAKS_OBJDIR)/tests/%.o,$(TEST_SRCS))

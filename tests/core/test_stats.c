@@ -293,6 +293,40 @@ static void test_series(void)
     check_true(stats_series_count(NULL) == 0u, "NULL series has zero points");
 }
 
+static void test_series_summary(void)
+{
+    const double samples[5] = {5.0, 1.0, 3.0, 2.0, 4.0};
+    stats_series_t *series = NULL;
+    stats_point_summary_t summary = {0};
+
+    series = stats_series_create("summary", 1u);
+    check_true(series != NULL, "summary series is created");
+    if (series == NULL) {
+        return;
+    }
+
+    check_true(stats_series_push(series, 4096u, samples, 5u) == LB_STATUS_OK,
+               "summary series accepts a point");
+    check_true(stats_series_summary(series, 0u, &summary) == LB_STATUS_OK,
+               "stats_series_summary succeeds");
+    check_true(summary.x == 4096u, "summary keeps the working-set size");
+    check_true(summary.sample_count == 5u, "summary keeps the sample count");
+    check_true(approx(summary.min_ns, 1.0), "summary reports the minimum");
+    check_true(approx(summary.p10_ns, 1.0), "summary reports p10");
+    check_true(approx(summary.p50_ns, 3.0), "summary reports the median");
+    check_true(approx(summary.p90_ns, 5.0), "summary reports p90");
+    check_true(approx(summary.p99_ns, 5.0), "summary reports p99");
+
+    check_true(stats_series_summary(NULL, 0u, &summary) == LB_STATUS_INVALID_ARG,
+               "summary rejects a NULL series");
+    check_true(stats_series_summary(series, 0u, NULL) == LB_STATUS_INVALID_ARG,
+               "summary rejects a NULL output");
+    check_true(stats_series_summary(series, 1u, &summary) == LB_STATUS_INVALID_ARG,
+               "summary rejects an out-of-range index");
+
+    stats_series_free(series);
+}
+
 static void test_canary(void)
 {
     check_true(approx(stats_canary_drift_pct(1000u, 900u), -10.0),
@@ -317,6 +351,7 @@ int main(void)
     test_detect_flat_plateau();
     test_detect_validation();
     test_series();
+    test_series_summary();
     test_canary();
 
     printf("test_stats: %d checks, %d failures\n", g_checks, g_failures);
