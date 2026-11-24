@@ -271,7 +271,7 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
         tty_kv(cfg, "Batch / samples", "%" PRIu32 " ms / %u", cfg->batch_ms, TLB_SIZE_SAMPLES);
     }
 
-    baseline = stats_canary_measure(TLB_CANARY_MS);
+    baseline = stats_canary_baseline(TLB_CANARY_MS);
 
     count = TLB_SIZE_START_PAGES;
     for (;;) {

@@ -356,7 +356,7 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
         tty_kv(cfg, "Batch / samples", "%" PRIu32 " ms / %u", cfg->batch_ms, MEM_SIZE_SAMPLES);
     }
 
-    baseline = stats_canary_measure(MEM_CANARY_MS);
+    baseline = stats_canary_baseline(MEM_CANARY_MS);
 
     size = ((size_t)MEM_SIZE_START_BYTES / MEM_NODE_BYTES) * MEM_NODE_BYTES;
     if (size < MEM_SIZE_MIN_BYTES) {
@@ -575,7 +575,7 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
         tty_kv(cfg, "Accesses / repeats", "%u / %u", MEM_LINE_ACCESSES, MEM_LINE_REPEATS);
     }
 
-    baseline = stats_canary_measure(MEM_CANARY_MS);
+    baseline = stats_canary_baseline(MEM_CANARY_MS);
 
     for (step_index = 0u; step_index < LB_ARRAY_SIZE(MEM_LINE_STEPS); step_index++) {
         const size_t step = MEM_LINE_STEPS[step_index];
@@ -725,7 +725,7 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
 
     tty_csv_row(cfg, "mem,assoc,stride_bytes,nodes,ns_per_access");
 
-    baseline = stats_canary_measure(MEM_CANARY_MS);
+    baseline = stats_canary_baseline(MEM_CANARY_MS);
 
     for (stride_index = 0u; stride_index < stride_count; stride_index++) {
         const size_t stride = MEM_ASSOC_STRIDES[stride_index];
@@ -911,7 +911,7 @@ lb_status_t mem_prefetch_run(const lb_cfg_t *cfg)
 
     tty_csv_row(cfg, "mem,prefetch,variant,ns_per_access");
 
-    baseline = stats_canary_measure(MEM_CANARY_MS);
+    baseline = stats_canary_baseline(MEM_CANARY_MS);
 
     for (case_index = 0u; case_index < MEM_PREFETCH_CASES; case_index++) {
         size_t repeat = 0u;

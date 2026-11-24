@@ -30,8 +30,19 @@
 /* Maximum max/min spread allowed on the upper plateau. */
 #define STATS_STEP_PLATEAU_SPREAD_MAX 1.50
 
+/*
+ * A later step within this many points of the previous one, and with a small
+ * working-set ratio, belongs to the same smooth slope and must not be reported
+ * as a new cache level.
+ */
+#define STATS_STEP_MERGE_POINTS 3u
+#define STATS_STEP_MERGE_RATIO 2.50
+
 /* Dependent ALU chain iterations between clock reads in the canary. */
 #define STATS_CANARY_CHUNK 4096u
+
+/* Idle canary work used to settle the core before the baseline reading. */
+#define STATS_CANARY_WARMUP_MS 50u
 
 struct stats_point_t {
     size_t x;
@@ -135,6 +146,46 @@ static void stats_store_step(stats_step_t *step, const size_t *x, size_t index, 
     step->lower_ns = lower;
     step->upper_ns = upper;
     step->ratio = upper / lower;
+}
+
+static bool stats_same_direction(double prev_lower, double prev_upper, double lower, double upper)
+{
+    return ((prev_upper >= prev_lower) == (upper >= lower));
+}
+
+/*
+ * Append a detected step, or extend the previous one when both describe the
+ * same smooth slope. Steps arrive in increasing x order, so the last entry is
+ * always the nearest candidate on the low side.
+ */
+static void stats_add_step(stats_steps_t *steps, size_t *boundaries, const size_t *x,
+                           size_t boundary, double lower, double upper)
+{
+    stats_step_t *prev = NULL;
+
+    if (steps->count > 0u) {
+        prev = &steps->items[steps->count - 1u];
+        if (stats_same_direction(prev->lower_ns, prev->upper_ns, lower, upper)) {
+            const size_t prev_boundary = boundaries[steps->count - 1u];
+            const size_t gap = (boundary > prev_boundary) ? (boundary - prev_boundary) : 0u;
+            const double x_ratio = (double)x[boundary] / (double)x[prev_boundary];
+
+            if ((gap <= STATS_STEP_MERGE_POINTS) && (x_ratio < STATS_STEP_MERGE_RATIO)) {
+                prev->x_upper = x[boundary];
+                prev->x = prev->x_lower + (prev->x_upper - prev->x_lower) / 2u;
+                prev->upper_ns = upper;
+                prev->ratio = prev->upper_ns / prev->lower_ns;
+                return;
+            }
+        }
+    }
+
+    if (steps->count >= STATS_MAX_STEPS) {
+        return;
+    }
+    stats_store_step(&steps->items[steps->count], x, boundary, lower, upper);
+    boundaries[steps->count] = boundary;
+    steps->count++;
 }
 
 stats_series_t *stats_series_create(const char *label, size_t capacity)
@@ -515,6 +566,7 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
 {
     double *smoothed = NULL;
     size_t *sharp = NULL;
+    size_t boundaries[STATS_MAX_STEPS] = {0u};
     size_t sharp_count = 0u;
     double min_jump = 0.0;
     size_t i = 0u;
@@ -594,8 +646,7 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
                 break;
             }
             stats_measure_plateaus(smoothed, gradual, segment_begin, segment_end, &lower, &upper);
-            stats_store_step(&steps->items[steps->count], x, gradual, lower, upper);
-            steps->count++;
+            stats_add_step(steps, boundaries, x, gradual, lower, upper);
         }
 
         if (segment_index == sharp_count) {
@@ -614,8 +665,7 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
             double upper = 0.0;
 
             stats_measure_plateaus(smoothed, boundary, lower_begin, upper_end, &lower, &upper);
-            stats_store_step(&steps->items[steps->count], x, boundary, lower, upper);
-            steps->count++;
+            stats_add_step(steps, boundaries, x, boundary, lower, upper);
         }
         segment_begin = sharp[segment_index];
     }
@@ -660,6 +710,12 @@ uint64_t stats_canary_measure(uint32_t duration_ms)
 
     PAL_KEEP_INT(state);
     return ops;
+}
+
+uint64_t stats_canary_baseline(uint32_t duration_ms)
+{
+    (void)stats_canary_measure(STATS_CANARY_WARMUP_MS);
+    return stats_canary_measure(duration_ms);
 }
 
 double stats_canary_drift_pct(uint64_t baseline_ops, uint64_t after_ops)
