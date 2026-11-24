@@ -289,6 +289,12 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
         tty_err("memory budget is too small for dram bw");
         return LB_STATUS_NOMEM;
     }
+    /*
+     * Copy bandwidth needs two buffers, so the shared budget is split in half.
+     * On a 32 MiB board a single full-budget buffer per side would otherwise
+     * exceed the free memory and trigger the OOM killer.
+     */
+    bytes /= 2u;
     bytes = (bytes / page_size) * page_size;
     if (bytes < DRAM_BW_MIN_BYTES) {
         tty_err("memory budget is too small for dram bw");
