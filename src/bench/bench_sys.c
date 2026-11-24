@@ -63,6 +63,10 @@ static void sys_format_bytes_mib(uint64_t bytes, char *out, size_t capacity)
 
 static void sys_apply_runtime(const lb_cfg_t *cfg)
 {
+    if (cfg->runtime_applied) {
+        return;
+    }
+
     if (cfg->cpu_id >= 0) {
         const lb_status_t status = pal_pin_cpu(cfg->cpu_id);
 

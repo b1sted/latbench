@@ -60,6 +60,28 @@ static const char *auto_text(const char *text, const char *fallback)
     return (text != NULL && text[0] != '\0') ? text : fallback;
 }
 
+/*
+ * Apply --cpu and --qos exactly once for the whole auto run. Every probe skips
+ * its own runtime setup when runtime_applied is set, so an unsupported request
+ * produces one warning instead of one per subtest.
+ */
+static void auto_apply_runtime(lb_cfg_t *cfg)
+{
+    if (cfg->cpu_id >= 0) {
+        if (pal_pin_cpu(cfg->cpu_id) != LB_STATUS_OK) {
+            tty_warn("CPU pinning to %" PRId32 " was not applied", cfg->cpu_id);
+        }
+    }
+
+    if (cfg->qos_set) {
+        if (pal_set_qos(cfg->qos_perf) != LB_STATUS_OK) {
+            tty_warn("QoS request '%s' was not applied", cfg->qos_perf ? "perf" : "bg");
+        }
+    }
+
+    cfg->runtime_applied = true;
+}
+
 static void auto_print_passport(const lb_cfg_t *cfg, const lb_passport_t *p)
 {
     char page[LB_NAME_MAX] = {0};
@@ -270,6 +292,13 @@ lb_status_t lb_auto_run(const lb_cfg_t *cfg)
     run = *cfg;
     run.fast = true;
     run.auto_mode = true;
+    /*
+     * The passport always reports both context-switch mechanisms. A --mode
+     * selection intended for topo ping-pong must not zero one of them.
+     */
+    run.os_ctx_mode = LB_OS_CTX_BOTH;
+    run.runtime_applied = false;
+    auto_apply_runtime(&run);
 
     lb_passport_reset();
     passport = lb_passport_mutable();

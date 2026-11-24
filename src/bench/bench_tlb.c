@@ -96,6 +96,10 @@ static uint32_t tlb_arena_flags(const lb_cfg_t *cfg)
 
 static void tlb_apply_runtime(const lb_cfg_t *cfg)
 {
+    if (cfg->runtime_applied) {
+        return;
+    }
+
     if (cfg->cpu_id >= 0) {
         if (pal_pin_cpu(cfg->cpu_id) != LB_STATUS_OK) {
             tty_warn("CPU pinning to %" PRId32 " was not applied", cfg->cpu_id);

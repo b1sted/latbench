@@ -41,8 +41,8 @@
 #define DRAM_ROW_WARMUP UINT64_C(65536)
 #define DRAM_ROW_REPEATS 3u
 
-/* Compact auto mode: smaller arenas, fewer accesses and repeats. */
-#define DRAM_FAST_MAX_BYTES (UINT64_C(8) * UINT64_C(1024) * UINT64_C(1024))
+/* Compact auto mode: fewer accesses and repeats; arenas stay above L3. */
+#define DRAM_FAST_MAX_BYTES (UINT64_C(64) * UINT64_C(1024) * UINT64_C(1024))
 #define DRAM_BW_FAST_REPEATS 2u
 #define DRAM_ROW_FAST_ACCESSES UINT64_C(262144)
 #define DRAM_ROW_FAST_REPEATS 2u
@@ -88,6 +88,10 @@ static uint32_t dram_arena_flags(const lb_cfg_t *cfg)
 
 static void dram_apply_runtime(const lb_cfg_t *cfg)
 {
+    if (cfg->runtime_applied) {
+        return;
+    }
+
     if (cfg->cpu_id >= 0) {
         if (pal_pin_cpu(cfg->cpu_id) != LB_STATUS_OK) {
             tty_warn("CPU pinning to %" PRId32 " was not applied", cfg->cpu_id);
@@ -472,7 +476,7 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
 
     dram_apply_runtime(cfg);
 
-    arena_bytes = dram_arena_cap(cfg, cfg->fast ? DRAM_FAST_MAX_BYTES : DRAM_ROW_MAX_BYTES, true);
+    arena_bytes = dram_arena_cap(cfg, DRAM_ROW_MAX_BYTES, true);
     arena_bytes = (arena_bytes / page_size) * page_size;
     page_count = arena_bytes / page_size;
     if (page_count < DRAM_ROW_MIN_PAGES) {

@@ -59,10 +59,27 @@ static FILE *tty_info_stream(const lb_cfg_t *cfg)
 
 /*
  * Auto mode hides the per-probe detail so the final Passport card stays the
- * only thing on stdout. Quiet mode suppresses informational output entirely.
- * CSV mode is never suppressed: its records are the machine-readable result.
+ * only thing on stdout. In CSV mode the passport records are written through
+ * tty_csv_row(), so suppressing the human-readable tables here keeps stderr
+ * limited to progress and diagnostics. Quiet mode suppresses informational
+ * output entirely.
  */
 static bool tty_info_suppressed(const lb_cfg_t *cfg)
+{
+    if (cfg == NULL) {
+        return false;
+    }
+    if (cfg->quiet) {
+        return true;
+    }
+    return cfg->auto_mode;
+}
+
+/*
+ * Plots and matrices still publish their CSV records in auto CSV mode, so they
+ * only skip the computation when there is nothing machine-readable to emit.
+ */
+static bool tty_plot_suppressed(const lb_cfg_t *cfg)
 {
     if (cfg == NULL) {
         return false;
@@ -524,7 +541,7 @@ lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
     if (series == NULL) {
         return LB_STATUS_INVALID_ARG;
     }
-    if (tty_info_suppressed(cfg)) {
+    if (tty_plot_suppressed(cfg)) {
         return LB_STATUS_OK;
     }
 
@@ -667,7 +684,7 @@ lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint6
     if (latency_ns == NULL || count == 0u || count > (size_t)TTY_MATRIX_MAX_SIZE) {
         return LB_STATUS_INVALID_ARG;
     }
-    if (tty_info_suppressed(cfg)) {
+    if (tty_plot_suppressed(cfg)) {
         return LB_STATUS_OK;
     }
 

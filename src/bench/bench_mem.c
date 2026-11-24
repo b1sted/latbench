@@ -45,8 +45,8 @@
 #define MEM_SIZE_AUTO_MAX_BYTES (UINT64_C(512) * UINT64_C(1024) * UINT64_C(1024))
 
 /*
- * Compact auto mode: a small arena, a 2x sweep, and fewer samples keep the
- * whole passport run short and safe on 64 MiB targets.
+ * Compact auto mode: a fine 1.25x sweep with a short batch keeps the whole
+ * passport run short while still resolving the 32 KiB L1d boundary.
  */
 #define MEM_FAST_MAX_BYTES (UINT64_C(64) * UINT64_C(1024) * UINT64_C(1024))
 #define MEM_FAST_BATCH_MS 5u
@@ -154,6 +154,10 @@ static uint32_t mem_arena_flags(const lb_cfg_t *cfg)
 
 static void mem_apply_runtime(const lb_cfg_t *cfg)
 {
+    if (cfg->runtime_applied) {
+        return;
+    }
+
     if (cfg->cpu_id >= 0) {
         if (pal_pin_cpu(cfg->cpu_id) != LB_STATUS_OK) {
             tty_warn("CPU pinning to %" PRId32 " was not applied", cfg->cpu_id);
@@ -452,7 +456,7 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
         }
 
         {
-            size_t next = cfg->fast ? (size * 2u) : (size + (size / 4u));
+            size_t next = size + (size / 4u);
 
             if (next < size) {
                 break;
