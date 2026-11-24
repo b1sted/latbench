@@ -58,4 +58,8 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg);
 lb_status_t mem_assoc_run(const lb_cfg_t *cfg);
 lb_status_t mem_prefetch_run(const lb_cfg_t *cfg);
 
+/* TLB and page-fault subtests, implemented in src/bench/bench_tlb.c. */
+lb_status_t tlb_size_run(const lb_cfg_t *cfg);
+lb_status_t tlb_fault_run(const lb_cfg_t *cfg);
+
 #endif /* LB_BENCH_H */

@@ -50,7 +50,7 @@ CORE_SRCS := src/core/main.c src/core/stats.c src/core/tty.c src/core/util.c
 
 # Benchmark suites are listed explicitly so link order stays deterministic.
 # Add new src/bench/*.c files here as their modules are implemented.
-BENCH_SRCS := src/bench/bench_sys.c src/bench/bench_mem.c
+BENCH_SRCS := src/bench/bench_sys.c src/bench/bench_mem.c src/bench/bench_tlb.c
 
 SRCS := $(CORE_SRCS) $(BENCH_SRCS)
 SRCS += $(PLATFORM_SRCS)
@@ -149,6 +149,8 @@ test: all $(TEST_BINS)
 		echo "RUN $$test_bin"; \
 		./$$test_bin; \
 	done
+	@echo "RUN ./$(BIN) selftest"
+	@./$(BIN) selftest
 
 leaks: $(LEAKS_BIN) $(LEAKS_TEST_BINS)
 	@set -e; \
