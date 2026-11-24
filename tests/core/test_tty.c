@@ -174,7 +174,7 @@ static void test_plot_rejects_null_series(void)
 {
     lb_cfg_t cfg = {0};
 
-    check_true(tty_plot_series(&cfg, NULL, NULL, NULL, 0u) == LB_STATUS_INVALID_ARG,
+    check_true(tty_plot_series(&cfg, NULL, NULL, NULL, 0u, 0u) == LB_STATUS_INVALID_ARG,
                "plot rejects a NULL series");
 }
 
@@ -198,7 +198,7 @@ static void test_plot_table(void)
 
     check_true(capture_start(TEST_CAPTURE_OUT), "table capture starts");
     if (g_stdout_captured) {
-        check_true(tty_plot_series(&cfg, series, &steps, names, 2u) == LB_STATUS_OK,
+        check_true(tty_plot_series(&cfg, series, &steps, names, 2u, 0u) == LB_STATUS_OK,
                    "table plot succeeds");
         (void)capture_read(TEST_CAPTURE_OUT, output, sizeof(output));
 
@@ -240,7 +240,7 @@ static void test_plot_csv(void)
 
     check_true(capture_start(TEST_CAPTURE_CSV), "CSV capture starts");
     if (g_stdout_captured) {
-        check_true(tty_plot_series(&cfg, series, &steps, names, 2u) == LB_STATUS_OK,
+        check_true(tty_plot_series(&cfg, series, &steps, names, 2u, 0u) == LB_STATUS_OK,
                    "CSV plot succeeds");
         (void)capture_read(TEST_CAPTURE_CSV, output, sizeof(output));
 
@@ -259,10 +259,44 @@ static void test_plot_csv(void)
     stats_series_free(series);
 }
 
+static void test_plot_pages(void)
+{
+    const char *names[2] = {"L1 dTLB", "L2 TLB"};
+    stats_series_t *series = make_series();
+    stats_steps_t steps = {0};
+    lb_cfg_t cfg = {0};
+    char output[TEST_CAPTURE_SIZE] = {0};
+
+    check_true(series != NULL, "page series is created");
+    if (series == NULL) {
+        return;
+    }
+
+    make_steps(&steps);
+    cfg.no_color = true;
+    cfg.csv = false;
+    tty_set_no_color(true);
+
+    check_true(capture_start(TEST_CAPTURE_OUT), "page capture starts");
+    if (g_stdout_captured) {
+        check_true(tty_plot_series(&cfg, series, &steps, names, 2u, 4096u) == LB_STATUS_OK,
+                   "page plot succeeds");
+        (void)capture_read(TEST_CAPTURE_OUT, output, sizeof(output));
+
+        check_true(strstr(output, "Pages") != NULL, "page plot adds a Pages column");
+        check_true(strstr(output, "~48 KiB (~12 pages, L1 dTLB)") != NULL,
+                   "thresholds report the page count next to the level label");
+        check_true(lines_fit(output, TEST_PLOT_WIDTH), "page table stays within 80 columns");
+    }
+
+    stats_series_free(series);
+}
+
 int main(void)
 {
     test_plot_rejects_null_series();
     test_plot_table();
+    test_plot_pages();
     test_plot_csv();
 
     if (g_stdout_captured) {

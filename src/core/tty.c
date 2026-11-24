@@ -12,7 +12,7 @@
 #include "pal/pal.h"
 #include "types.h"
 
-#define TTY_KEY_WIDTH 16
+#define TTY_KEY_WIDTH 20
 #define TTY_ANSI_RESET "\x1b[0m"
 #define TTY_ANSI_BOLD "\x1b[1m"
 #define TTY_ANSI_WARN "\x1b[1;33m"
@@ -29,6 +29,7 @@
 #define TTY_PLOT_WIDTH 76u
 #define TTY_PLOT_BAR_WIDTH 20u
 #define TTY_PLOT_FIELD_WIDTH 10
+#define TTY_PLOT_FLAT_RATIO 1.5
 #define TTY_DRIFT_WARN_PCT 10.0
 
 static bool g_tty_section_started = false;
@@ -332,8 +333,35 @@ static size_t tty_bar_length(double value, double min_value, double max_value, s
     return filled;
 }
 
-static const char *tty_format_bar(double value, double min_value, double max_value, char *out,
-                                  size_t capacity)
+static size_t tty_bar_length_linear(double value, double max_value, size_t width)
+{
+    double position = 0.0;
+    size_t filled = 0u;
+
+    if (width == 0u) {
+        return 0u;
+    }
+    if (!(max_value > 0.0)) {
+        return 0u;
+    }
+
+    position = value / max_value;
+    if (!(position > 0.0)) {
+        position = 0.0;
+    }
+    if (position > 1.0) {
+        position = 1.0;
+    }
+
+    filled = (size_t)((position * (double)width) + 0.5);
+    if (filled > width) {
+        filled = width;
+    }
+    return filled;
+}
+
+static const char *tty_format_bar(double value, double min_value, double max_value, bool linear,
+                                  char *out, size_t capacity)
 {
     size_t filled = 0u;
     size_t i = 0u;
@@ -342,7 +370,11 @@ static const char *tty_format_bar(double value, double min_value, double max_val
         return "";
     }
 
-    filled = tty_bar_length(value, min_value, max_value, TTY_PLOT_BAR_WIDTH);
+    if (linear) {
+        filled = tty_bar_length_linear(value, max_value, TTY_PLOT_BAR_WIDTH);
+    } else {
+        filled = tty_bar_length(value, min_value, max_value, TTY_PLOT_BAR_WIDTH);
+    }
     if (filled >= capacity) {
         filled = capacity - 1u;
     }
@@ -364,8 +396,17 @@ static const char *tty_threshold_name(const char *const *level_names, size_t lev
     return fallback;
 }
 
+static size_t tty_pages_for_bytes(size_t bytes, size_t page_size)
+{
+    if (page_size == 0u) {
+        return 0u;
+    }
+    return (bytes + (page_size / 2u)) / page_size;
+}
+
 static void tty_print_thresholds(const lb_cfg_t *cfg, const stats_steps_t *steps,
-                                 const char *const *level_names, size_t level_name_count)
+                                 const char *const *level_names, size_t level_name_count,
+                                 size_t page_size)
 {
     char list[LB_CSV_MAX] = {0};
     char size[LB_NAME_MAX] = {0};
@@ -385,8 +426,14 @@ static void tty_print_thresholds(const lb_cfg_t *cfg, const stats_steps_t *steps
         int written = 0;
 
         (void)tty_format_bytes((uint64_t)steps->items[i].x, size, sizeof(size));
-        written = snprintf(list + used, sizeof(list) - used, "%s~%s (%s)", (i == 0u) ? "" : ", ",
-                           size, name);
+        if (page_size > 0u) {
+            written = snprintf(list + used, sizeof(list) - used, "%s~%s (~%zu pages, %s)",
+                               (i == 0u) ? "" : ", ", size,
+                               tty_pages_for_bytes(steps->items[i].x, page_size), name);
+        } else {
+            written = snprintf(list + used, sizeof(list) - used, "%s~%s (%s)",
+                               (i == 0u) ? "" : ", ", size, name);
+        }
         if (written < 0 || (size_t)written >= (sizeof(list) - used)) {
             fits = false;
             break;
@@ -405,7 +452,12 @@ static void tty_print_thresholds(const lb_cfg_t *cfg, const stats_steps_t *steps
             tty_threshold_name(level_names, level_name_count, i, fallback, sizeof(fallback));
 
         (void)tty_format_bytes((uint64_t)steps->items[i].x, size, sizeof(size));
-        tty_header(cfg, "  ~%s (%s)", size, name);
+        if (page_size > 0u) {
+            tty_header(cfg, "  ~%s (~%zu pages, %s)", size,
+                       tty_pages_for_bytes(steps->items[i].x, page_size), name);
+        } else {
+            tty_header(cfg, "  ~%s (%s)", size, name);
+        }
     }
 }
 
@@ -432,7 +484,7 @@ static void tty_csv_field(const char *text, char *out, size_t capacity)
 
 lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
                             const stats_steps_t *steps, const char *const *level_names,
-                            size_t level_name_count)
+                            size_t level_name_count, size_t page_size)
 {
     const char *label = NULL;
     stats_point_summary_t *summaries = NULL;
@@ -487,6 +539,7 @@ lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
         double min_value = 0.0;
         double max_value = 0.0;
         bool have_value = false;
+        bool flat_scale = false;
 
         for (size_t i = 0u; i < count; i++) {
             const double value = summaries[i].p10_ns;
@@ -502,10 +555,20 @@ lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
             }
             have_value = true;
         }
+        if (have_value && (min_value > 0.0)) {
+            flat_scale = (max_value / min_value) < TTY_PLOT_FLAT_RATIO;
+        }
 
-        (void)snprintf(header, sizeof(header), "  %*s %*s %*s %*s  %s", TTY_PLOT_FIELD_WIDTH,
-                       "Size", TTY_PLOT_FIELD_WIDTH, "p10 ns", TTY_PLOT_FIELD_WIDTH, "p50 ns",
-                       TTY_PLOT_FIELD_WIDTH, "p90 ns", "Latency (log)");
+        if (page_size > 0u) {
+            (void)snprintf(header, sizeof(header), "  %*s %*s %*s %*s %*s  %s",
+                           TTY_PLOT_FIELD_WIDTH, "Size", TTY_PLOT_FIELD_WIDTH, "p10 ns",
+                           TTY_PLOT_FIELD_WIDTH, "p50 ns", TTY_PLOT_FIELD_WIDTH, "p90 ns",
+                           TTY_PLOT_FIELD_WIDTH, "Pages", "Latency (log)");
+        } else {
+            (void)snprintf(header, sizeof(header), "  %*s %*s %*s %*s  %s", TTY_PLOT_FIELD_WIDTH,
+                           "Size", TTY_PLOT_FIELD_WIDTH, "p10 ns", TTY_PLOT_FIELD_WIDTH, "p50 ns",
+                           TTY_PLOT_FIELD_WIDTH, "p90 ns", "Latency (log)");
+        }
         tty_header(cfg, "%s", header);
 
         for (size_t i = 0u; i < count; i++) {
@@ -513,6 +576,7 @@ lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
             char p10[32] = {0};
             char p50[32] = {0};
             char p90[32] = {0};
+            char pages[32] = {0};
             char bar[TTY_PLOT_BAR_WIDTH + 1u] = {0};
             char line[LB_LINE_MAX] = {0};
 
@@ -520,18 +584,28 @@ lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
             (void)snprintf(p10, sizeof(p10), "%.4g", summaries[i].p10_ns);
             (void)snprintf(p50, sizeof(p50), "%.4g", summaries[i].p50_ns);
             (void)snprintf(p90, sizeof(p90), "%.4g", summaries[i].p90_ns);
+            (void)snprintf(pages, sizeof(pages), "%zu",
+                           tty_pages_for_bytes(summaries[i].x, page_size));
             if (have_value) {
-                (void)tty_format_bar(summaries[i].p10_ns, min_value, max_value, bar, sizeof(bar));
+                (void)tty_format_bar(summaries[i].p10_ns, min_value, max_value, flat_scale, bar,
+                                     sizeof(bar));
             }
 
-            (void)snprintf(line, sizeof(line), "  %*s %*s %*s %*s  %s", TTY_PLOT_FIELD_WIDTH, size,
-                           TTY_PLOT_FIELD_WIDTH, p10, TTY_PLOT_FIELD_WIDTH, p50,
-                           TTY_PLOT_FIELD_WIDTH, p90, bar);
+            if (page_size > 0u) {
+                (void)snprintf(line, sizeof(line), "  %*s %*s %*s %*s %*s  %s",
+                               TTY_PLOT_FIELD_WIDTH, size, TTY_PLOT_FIELD_WIDTH, p10,
+                               TTY_PLOT_FIELD_WIDTH, p50, TTY_PLOT_FIELD_WIDTH, p90,
+                               TTY_PLOT_FIELD_WIDTH, pages, bar);
+            } else {
+                (void)snprintf(line, sizeof(line), "  %*s %*s %*s %*s  %s", TTY_PLOT_FIELD_WIDTH,
+                               size, TTY_PLOT_FIELD_WIDTH, p10, TTY_PLOT_FIELD_WIDTH, p50,
+                               TTY_PLOT_FIELD_WIDTH, p90, bar);
+            }
             tty_header(cfg, "%s", line);
         }
     }
 
-    tty_print_thresholds(cfg, steps, level_names, level_name_count);
+    tty_print_thresholds(cfg, steps, level_names, level_name_count, page_size);
     status = LB_STATUS_OK;
 
 cleanup:

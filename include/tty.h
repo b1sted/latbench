@@ -44,10 +44,12 @@ void tty_err(const char *fmt, ...) PAL_PRINTF_FORMAT(1, 2);
 void tty_warn_drift(double drift_pct);
 
 /*
- * Render one working-set latency series as a compact table plus a logarithmic
- * ASCII bar. Sizes are byte counts and are scaled to KiB/MiB/GiB. The optional
+ * Render one working-set latency series as a compact table plus an ASCII bar.
+ * Sizes are byte counts and are scaled to KiB/MiB/GiB. The optional
  * level_names array labels detected thresholds (for example "L1", "L2"); short
- * or missing labels fall back to "step N".
+ * or missing labels fall back to "step N". When page_size is non-zero, the
+ * threshold summary also reports the equivalent page count and the table gains
+ * a Pages column.
  *
  * Heading, table, and threshold summary go to stdout, except in CSV mode where
  * stdout receives only the data header and one clean record per point. All
@@ -55,7 +57,7 @@ void tty_warn_drift(double drift_pct);
  */
 lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
                             const stats_steps_t *steps, const char *const *level_names,
-                            size_t level_name_count);
+                            size_t level_name_count, size_t page_size);
 
 /* Render a byte count as a binary unit, for example "27.08 GiB". */
 const char *tty_format_bytes(uint64_t bytes, char *out, size_t capacity);

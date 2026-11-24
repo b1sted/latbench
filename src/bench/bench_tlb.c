@@ -319,7 +319,8 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
     if (status != LB_STATUS_OK) {
         goto cleanup;
     }
-    status = tty_plot_series(cfg, series, &steps, TLB_SIZE_LEVELS, LB_ARRAY_SIZE(TLB_SIZE_LEVELS));
+    status = tty_plot_series(cfg, series, &steps, TLB_SIZE_LEVELS, LB_ARRAY_SIZE(TLB_SIZE_LEVELS),
+                             page_size);
 
 cleanup:
     stats_series_free(series);
