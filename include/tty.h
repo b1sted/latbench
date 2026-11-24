@@ -38,8 +38,9 @@ void tty_warn(const char *fmt, ...) PAL_PRINTF_FORMAT(1, 2);
 void tty_err(const char *fmt, ...) PAL_PRINTF_FORMAT(1, 2);
 
 /*
- * Warn when a DVFS canary drift exceeds ten percent in either direction.
- * Drift within the tolerance, or a non-finite value, produces no output.
+ * Warn when a DVFS canary drifts below -10% (real throttling) or above +25%
+ * (an extreme upward spike). Moderate positive drift from Turbo headroom is
+ * expected and silent, as is any non-finite value.
  */
 void tty_warn_drift(double drift_pct);
 

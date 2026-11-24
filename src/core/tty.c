@@ -30,7 +30,8 @@
 #define TTY_PLOT_BAR_WIDTH 20u
 #define TTY_PLOT_FIELD_WIDTH 10
 #define TTY_PLOT_FLAT_RATIO 1.5
-#define TTY_DRIFT_WARN_PCT 10.0
+#define TTY_DRIFT_WARN_DROP_PCT 10.0
+#define TTY_DRIFT_WARN_SPIKE_PCT 25.0
 
 /* Latency heatmap: seven-character cells keep common topologies readable. */
 #define TTY_MATRIX_MAX_SIZE 256u
@@ -225,13 +226,13 @@ void tty_err(const char *fmt, ...)
 
 void tty_warn_drift(double drift_pct)
 {
-    double magnitude = drift_pct;
-
-    if (magnitude < 0.0) {
-        magnitude = -magnitude;
-    }
-    if (magnitude > TTY_DRIFT_WARN_PCT) {
-        tty_warn("frequency drift %+.1f%% exceeds %.0f%%", drift_pct, TTY_DRIFT_WARN_PCT);
+    /*
+     * A moderate positive drift is normal Turbo headroom, not a defect. Only a
+     * real slowdown (throttling) or an extreme upward spike is worth a warning.
+     */
+    if (drift_pct < -TTY_DRIFT_WARN_DROP_PCT || drift_pct > TTY_DRIFT_WARN_SPIKE_PCT) {
+        tty_warn("frequency drift %+.1f%% (drop limit -%.0f%%, spike limit +%.0f%%)", drift_pct,
+                 TTY_DRIFT_WARN_DROP_PCT, TTY_DRIFT_WARN_SPIKE_PCT);
     }
 }
 
