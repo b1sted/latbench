@@ -138,6 +138,11 @@ lb_status_t pal_set_qos(bool high_perf)
     return LB_STATUS_UNSUPPORTED;
 }
 
+bool pal_pin_supported(void)
+{
+    return true;
+}
+
 pal_mem_t *pal_mem_alloc(size_t size, uint32_t flags)
 {
     pal_mem_t *mem = NULL;

@@ -79,6 +79,11 @@ lb_status_t pal_pin_cpu(int32_t cpu_id)
     return LB_STATUS_UNSUPPORTED;
 }
 
+bool pal_pin_supported(void)
+{
+    return false;
+}
+
 lb_status_t pal_set_qos(bool high_perf)
 {
     qos_class_t qos = QOS_CLASS_BACKGROUND;

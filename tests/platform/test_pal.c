@@ -8,6 +8,13 @@
 #include "pal/compiler.h"
 #include "pal/pal.h"
 
+#define PAL_TEST_THREAD_VALUE 0x5a5a5a5au
+
+typedef struct pal_test_thread_arg_t {
+    uint32_t value;
+    uint32_t seen;
+} pal_test_thread_arg_t;
+
 static int g_checks = 0;
 static int g_failures = 0;
 
@@ -164,6 +171,45 @@ static void test_qos(void)
                "pal_set_qos(false) succeeds or reports unsupported");
 }
 
+static void pal_test_thread_main(void *arg)
+{
+    pal_test_thread_arg_t *ctx = arg;
+
+    if (ctx != NULL) {
+        ctx->value = PAL_TEST_THREAD_VALUE;
+        ctx->seen = 1u;
+    }
+}
+
+static void test_thread_lifecycle(void)
+{
+    pal_test_thread_arg_t ctx = {0u, 0u};
+    pal_thread_t *thread = pal_thread_spawn(pal_test_thread_main, &ctx, -1, false);
+
+    check_true(thread != NULL, "pal_thread_spawn returns a handle");
+    if (thread != NULL) {
+        check_true(pal_thread_join(thread) == LB_STATUS_OK, "pal_thread_join completes");
+        check_true(ctx.seen != 0u, "spawned thread runs its entry point");
+        check_true(ctx.value == PAL_TEST_THREAD_VALUE, "spawned thread receives its argument");
+    }
+
+    check_true(pal_thread_join(NULL) == LB_STATUS_INVALID_ARG, "pal_thread_join rejects NULL");
+    check_true(pal_thread_spawn(NULL, NULL, -1, false) == NULL,
+               "pal_thread_spawn rejects a NULL entry point");
+}
+
+static void test_thread_pinned(void)
+{
+    pal_test_thread_arg_t ctx = {0u, 0u};
+    pal_thread_t *thread = pal_thread_spawn(pal_test_thread_main, &ctx, 0, true);
+
+    check_true(thread != NULL, "pinned pal_thread_spawn returns a handle");
+    if (thread != NULL) {
+        check_true(pal_thread_join(thread) == LB_STATUS_OK, "pinned pal_thread_join completes");
+        check_true(ctx.seen != 0u, "pinned thread runs its entry point");
+    }
+}
+
 static void test_atomics(void)
 {
     uint32_t value = 0u;
@@ -214,6 +260,8 @@ int main(void)
     test_arch_name();
     test_cpu_and_pinning();
     test_qos();
+    test_thread_lifecycle();
+    test_thread_pinned();
     test_atomics();
     test_compiler_primitives();
 
