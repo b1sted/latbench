@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "auto.h"
 #include "bench.h"
 #include "defs.h"
 #include "pal/compiler.h"
@@ -95,6 +96,16 @@ static const lb_subtest_t TOPO_SUBTESTS[] = {
     {"pingpong", "core-to-core token ping-pong one-way latency (RTT/2)", topo_pingpong_run},
 };
 
+static const lb_subtest_t OS_SUBTESTS[] = {
+    {"syscall", "userland timer versus a guaranteed kernel write() transition", os_syscall_run},
+    {"ctx", "thread or process context switch over a pipe ping-pong", os_ctx_run},
+    {"wakeup", "scheduler wakeup cost with mutex and condition variable", os_wakeup_run},
+    {"shootdown", "mprotect TLB shootdown cost, single and multi-thread", os_shootdown_run},
+    {"fork", "fork, child _exit(0), and parent waitpid cost", os_fork_run},
+    {"sig", "self-delivered SIGUSR1 signal round trip", os_sig_run},
+    {"sleep", "nanosleep overshoot at 1 us and 100 us targets", os_sleep_run},
+};
+
 static const lb_module_t BENCH_MODULES[] = {
     {"sys", "system calibration and clock diagnostics", SYS_SUBTESTS, LB_ARRAY_SIZE(SYS_SUBTESTS)},
     {"mem", "cache size, line, associativity, and prefetcher probes", MEM_SUBTESTS,
@@ -108,6 +119,8 @@ static const lb_module_t BENCH_MODULES[] = {
      LB_ARRAY_SIZE(DRAM_SUBTESTS)},
     {"topo", "core-to-core atomics, false sharing, and ping-pong", TOPO_SUBTESTS,
      LB_ARRAY_SIZE(TOPO_SUBTESTS)},
+    {"os", "syscall, context switch, shootdown, fork, signal, and sleep probes", OS_SUBTESTS,
+     LB_ARRAY_SIZE(OS_SUBTESTS)},
 };
 
 const lb_module_t *lb_bench_modules(size_t *count)
@@ -513,6 +526,7 @@ static void print_help(const lb_cfg_t *cfg)
     modules = lb_bench_modules(&module_count);
 
     tty_header(cfg, "Usage: latbench <module> <subtest> [OPTIONS]");
+    tty_header(cfg, "       latbench auto [OPTIONS]");
     tty_header(cfg, "%s", "");
 
     tty_section(cfg, "Runtime");
@@ -525,8 +539,8 @@ static void print_help(const lb_cfg_t *cfg)
     tty_header(cfg, HELP_FLAG_FMT, "    --no-thp", "avoid transparent huge pages (default)");
     tty_header(cfg, HELP_FLAG_FMT, "    --thp", "allow transparent huge pages");
     tty_header(cfg, HELP_FLAG_FMT, "    --long", "extend sys throttle to 10 seconds");
-    tty_header(cfg, HELP_FLAG_FMT, "    --mode <cas|flag>",
-               "topo pingpong token handoff (default: flag)");
+    tty_header(cfg, HELP_FLAG_FMT, "    --mode <cas|flag|thread|proc>",
+               "topo pingpong handoff (default flag) or os ctx (default both)");
 
     tty_section(cfg, "Output");
     tty_header(cfg, HELP_FLAG_FMT, "    --csv", "emit CSV to stdout; diagnostics to stderr");
@@ -539,6 +553,10 @@ static void print_help(const lb_cfg_t *cfg)
     tty_section(cfg, "System");
     tty_header(cfg, HELP_FLAG_FMT, "-h, --help", "display this help and exit");
     tty_header(cfg, HELP_FLAG_FMT, "-V, --version", "output version information and exit");
+
+    tty_section(cfg, "Profiles");
+    tty_header(cfg, HELP_FLAG_FMT, "    auto",
+               "compact full-machine probes and a unified Passport card");
 
     tty_section(cfg, "Diagnostics");
     tty_header(cfg, HELP_FLAG_FMT, "    selftest",
@@ -662,8 +680,13 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
                 cfg->topo_pingpong_cas = true;
             } else if (strcmp(argv[i], "flag") == 0) {
                 cfg->topo_pingpong_cas = false;
+            } else if (strcmp(argv[i], "thread") == 0) {
+                cfg->os_ctx_mode = LB_OS_CTX_THREAD;
+            } else if (strcmp(argv[i], "proc") == 0) {
+                cfg->os_ctx_mode = LB_OS_CTX_PROC;
             } else {
-                tty_err("invalid value for --mode: '%s' (expected cas or flag)", argv[i]);
+                tty_err("invalid value for --mode: '%s' (expected cas, flag, thread, or proc)",
+                        argv[i]);
                 return LB_STATUS_INVALID_ARG;
             }
             continue;
@@ -746,6 +769,10 @@ int main(int argc, char **argv)
     cfg.write = false;
     cfg.throttle_long = false;
     cfg.topo_pingpong_cas = false;
+    cfg.fast = false;
+    cfg.auto_mode = false;
+    cfg.quiet = false;
+    cfg.os_ctx_mode = LB_OS_CTX_BOTH;
 
     status = parse_args(argc, argv, &cfg, &show_help, &show_version, &module_name, &subtest_name);
     if (status != LB_STATUS_OK) {
@@ -782,6 +809,15 @@ int main(int argc, char **argv)
             return 2;
         }
         return (lb_selftest_run(&cfg) == LB_STATUS_OK) ? 0 : 1;
+    }
+
+    if (strcmp(module_name, "auto") == 0) {
+        if (subtest_name != NULL) {
+            tty_err("auto does not take a subtest");
+            print_help_to_stderr(&cfg);
+            return 2;
+        }
+        return (lb_auto_run(&cfg) == LB_STATUS_OK) ? 0 : 1;
     }
 
     if (subtest_name == NULL) {

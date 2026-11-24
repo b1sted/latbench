@@ -12,6 +12,7 @@
 #include "defs.h"
 #include "pal/compiler.h"
 #include "pal/pal.h"
+#include "passport.h"
 #include "stats.h"
 #include "tty.h"
 #include "types.h"
@@ -42,6 +43,20 @@
 
 /* Automatic mem size sweeps stop here so the last point stays in RAM. */
 #define MEM_SIZE_AUTO_MAX_BYTES (UINT64_C(512) * UINT64_C(1024) * UINT64_C(1024))
+
+/*
+ * Compact auto mode: a small arena, a 2x sweep, and fewer samples keep the
+ * whole passport run short and safe on 64 MiB targets.
+ */
+#define MEM_FAST_MAX_BYTES (UINT64_C(64) * UINT64_C(1024) * UINT64_C(1024))
+#define MEM_FAST_BATCH_MS 5u
+#define MEM_FAST_SAMPLES 3u
+#define MEM_ASSOC_FAST_MAX_BYTES (UINT64_C(8) * UINT64_C(1024) * UINT64_C(1024))
+#define MEM_ASSOC_FAST_ACCESSES 16384u
+#define MEM_ASSOC_FAST_REPEATS 2u
+#define MEM_PREFETCH_FAST_MAX_BYTES (UINT64_C(8) * UINT64_C(1024) * UINT64_C(1024))
+#define MEM_PREFETCH_FAST_ACCESSES 262144u
+#define MEM_PREFETCH_FAST_REPEATS 2u
 
 /*
  * mem line: two dependent loads per hop over 512-byte blocks. The block start
@@ -156,6 +171,41 @@ static void mem_cool(const lb_cfg_t *cfg)
 {
     if (cfg->cool_ms > 0u) {
         pal_sleep_ms(cfg->cool_ms);
+    }
+}
+
+static uint32_t mem_batch_ms(const lb_cfg_t *cfg)
+{
+    uint32_t batch = 0u;
+
+    if (cfg == NULL) {
+        return 0u;
+    }
+    batch = cfg->batch_ms;
+    if (!cfg->fast) {
+        return batch;
+    }
+    if (batch == 0u || batch > MEM_FAST_BATCH_MS) {
+        batch = MEM_FAST_BATCH_MS;
+    }
+    return batch;
+}
+
+static void mem_publish_cache_steps(const stats_steps_t *steps)
+{
+    lb_passport_t *passport = lb_passport_mutable();
+
+    if (steps == NULL) {
+        return;
+    }
+    if (steps->count > 0u) {
+        passport->l1d_bytes = (uint64_t)steps->items[0].x;
+    }
+    if (steps->count > 1u) {
+        passport->l2_bytes = (uint64_t)steps->items[1].x;
+    }
+    if (steps->count > 2u) {
+        passport->l3_bytes = (uint64_t)steps->items[2].x;
     }
 }
 
@@ -307,6 +357,9 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
     stats_series_t *series = NULL;
     stats_steps_t steps = {0};
     double samples[MEM_SIZE_SAMPLES] = {0.0};
+    size_t sample_count = 0u;
+    uint32_t batch_ms = 0u;
+    uint64_t size_limit = 0u;
     size_t arena_bytes = 0u;
     size_t max_nodes = 0u;
     size_t size = 0u;
@@ -318,10 +371,14 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
         return LB_STATUS_INVALID_ARG;
     }
 
+    sample_count = cfg->fast ? MEM_FAST_SAMPLES : MEM_SIZE_SAMPLES;
+    batch_ms = mem_batch_ms(cfg);
+    size_limit = cfg->fast ? MEM_FAST_MAX_BYTES
+                           : ((cfg->max_mem_mb == 0u) ? MEM_SIZE_AUTO_MAX_BYTES : UINT64_MAX);
+
     mem_apply_runtime(cfg);
 
-    arena_bytes =
-        mem_arena_cap(cfg, (cfg->max_mem_mb == 0u) ? MEM_SIZE_AUTO_MAX_BYTES : UINT64_MAX, true);
+    arena_bytes = mem_arena_cap(cfg, size_limit, true);
     arena_bytes = (arena_bytes / MEM_NODE_BYTES) * MEM_NODE_BYTES;
     if (arena_bytes < MEM_SIZE_MIN_BYTES) {
         tty_err("memory budget is too small for mem size");
@@ -355,7 +412,7 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
         (void)tty_format_bytes((uint64_t)arena_bytes, human, sizeof(human));
         tty_kv(cfg, "Walk mode", "%s", cfg->write ? "write (dirty)" : "read-only");
         tty_kv(cfg, "Arena limit", "%s", human);
-        tty_kv(cfg, "Batch / samples", "%" PRIu32 " ms / %u", cfg->batch_ms, MEM_SIZE_SAMPLES);
+        tty_kv(cfg, "Batch / samples", "%" PRIu32 " ms / %zu", batch_ms, sample_count);
     }
 
     baseline = stats_canary_baseline(MEM_CANARY_MS);
@@ -379,12 +436,12 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
             goto cleanup;
         }
 
-        for (sample = 0u; sample < MEM_SIZE_SAMPLES; sample++) {
-            samples[sample] = mem_size_sample(nodes, cfg->batch_ms, cfg->write);
+        for (sample = 0u; sample < sample_count; sample++) {
+            samples[sample] = mem_size_sample(nodes, batch_ms, cfg->write);
         }
         mem_cool(cfg);
 
-        status = stats_series_push(series, size, samples, MEM_SIZE_SAMPLES);
+        status = stats_series_push(series, size, samples, sample_count);
         if (status != LB_STATUS_OK) {
             goto cleanup;
         }
@@ -395,7 +452,7 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
         }
 
         {
-            size_t next = size + (size / 4u);
+            size_t next = cfg->fast ? (size * 2u) : (size + (size / 4u));
 
             if (next < size) {
                 break;
@@ -431,6 +488,7 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
     if (status != LB_STATUS_OK) {
         goto cleanup;
     }
+    mem_publish_cache_steps(&steps);
     status =
         tty_plot_series(cfg, series, &steps, MEM_SIZE_LEVELS, LB_ARRAY_SIZE(MEM_SIZE_LEVELS), 0u);
 
@@ -620,6 +678,64 @@ cleanup:
     return status;
 }
 
+static size_t mem_assoc_knee(const double *row, size_t limit, double *ratio_out)
+{
+    size_t best_node = 0u;
+    double best_ratio = 0.0;
+    size_t column = 0u;
+
+    if (ratio_out != NULL) {
+        *ratio_out = 0.0;
+    }
+    if (row == NULL) {
+        return 0u;
+    }
+
+    for (column = 1u; column < limit; column++) {
+        const double lower = row[column - 1u];
+        const double upper = row[column];
+        double ratio = 0.0;
+
+        if (!(lower > 0.0) || !(upper > lower)) {
+            continue;
+        }
+        ratio = upper / lower;
+        if (ratio < MEM_ASSOC_RATIO_MIN || (upper - lower) < MEM_ASSOC_JUMP_MIN_NS) {
+            continue;
+        }
+        if (ratio > best_ratio) {
+            best_ratio = ratio;
+            best_node = column + 1u;
+        }
+    }
+
+    if (ratio_out != NULL) {
+        *ratio_out = best_ratio;
+    }
+    return best_node;
+}
+
+static void mem_publish_assoc(double latencies[][MEM_ASSOC_MAX_NODES], const size_t limits[],
+                              size_t stride_count)
+{
+    lb_passport_t *passport = lb_passport_mutable();
+    size_t stride_index = 0u;
+    uint32_t best_ways = 0u;
+    double best_ratio = 0.0;
+
+    for (stride_index = 0u; stride_index < stride_count; stride_index++) {
+        double ratio = 0.0;
+        const size_t ways = mem_assoc_knee(latencies[stride_index], limits[stride_index], &ratio);
+
+        if (ways > 0u && ratio > best_ratio) {
+            best_ratio = ratio;
+            /* The knee is the first N that conflicts; the last fitting N is the associativity. */
+            best_ways = (ways > 1u) ? (uint32_t)(ways - 1u) : 0u;
+        }
+    }
+    passport->l1d_ways = best_ways;
+}
+
 static void mem_assoc_table(const lb_cfg_t *cfg, double latencies[][MEM_ASSOC_MAX_NODES],
                             const size_t limits[], size_t stride_count)
 {
@@ -653,23 +769,7 @@ static void mem_assoc_table(const lb_cfg_t *cfg, double latencies[][MEM_ASSOC_MA
             }
         }
 
-        for (column = 1u; column < limit; column++) {
-            const double lower = latencies[stride_index][column - 1u];
-            const double upper = latencies[stride_index][column];
-            double ratio = 0.0;
-
-            if (!(lower > 0.0) || !(upper > lower)) {
-                continue;
-            }
-            ratio = upper / lower;
-            if (ratio < MEM_ASSOC_RATIO_MIN || (upper - lower) < MEM_ASSOC_JUMP_MIN_NS) {
-                continue;
-            }
-            if (ratio > best_ratio) {
-                best_ratio = ratio;
-                best_node = column + 1u;
-            }
-        }
+        best_node = mem_assoc_knee(latencies[stride_index], limit, &best_ratio);
 
         if (best_node > 0u) {
             (void)snprintf(knee, sizeof(knee), "N=%zu x%.2f", best_node, best_ratio);
@@ -689,6 +789,8 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
     uint8_t *base = NULL;
     double latencies[LB_ARRAY_SIZE(MEM_ASSOC_STRIDES)][MEM_ASSOC_MAX_NODES] = {{0.0}};
     size_t limits[LB_ARRAY_SIZE(MEM_ASSOC_STRIDES)] = {0u};
+    size_t accesses = 0u;
+    size_t repeats = 0u;
     size_t buffer_bytes = 0u;
     size_t stride_count = LB_ARRAY_SIZE(MEM_ASSOC_STRIDES);
     size_t stride_index = 0u;
@@ -699,9 +801,13 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
         return LB_STATUS_INVALID_ARG;
     }
 
+    accesses = cfg->fast ? MEM_ASSOC_FAST_ACCESSES : MEM_ASSOC_ACCESSES;
+    repeats = cfg->fast ? MEM_ASSOC_FAST_REPEATS : MEM_ASSOC_REPEATS;
+
     mem_apply_runtime(cfg);
 
-    buffer_bytes = mem_arena_cap(cfg, MEM_ASSOC_MAX_BYTES, false);
+    buffer_bytes =
+        mem_arena_cap(cfg, cfg->fast ? MEM_ASSOC_FAST_MAX_BYTES : MEM_ASSOC_MAX_BYTES, false);
     if (buffer_bytes < MEM_MIN_ARENA_BYTES) {
         tty_err("memory budget is too small for mem assoc");
         return LB_STATUS_NOMEM;
@@ -722,7 +828,7 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
 
         (void)tty_format_bytes((uint64_t)buffer_bytes, human, sizeof(human));
         tty_kv(cfg, "Buffer", "%s", human);
-        tty_kv(cfg, "Accesses / repeats", "%u / %u", MEM_ASSOC_ACCESSES, MEM_ASSOC_REPEATS);
+        tty_kv(cfg, "Accesses / repeats", "%zu / %zu", accesses, repeats);
     }
 
     tty_csv_row(cfg, "mem,assoc,stride_bytes,nodes,ns_per_access");
@@ -765,22 +871,21 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
                     node->payload = (uint64_t)i;
                 }
 
-                for (repeat = 0u; repeat < MEM_ASSOC_REPEATS; repeat++) {
+                for (repeat = 0u; repeat < repeats; repeat++) {
                     const uint64_t begin = pal_now_ns();
-                    const uint64_t sink =
-                        mem_chase_hops((mem_node_t *)(void *)base, MEM_ASSOC_ACCESSES);
+                    const uint64_t sink = mem_chase_hops((mem_node_t *)(void *)base, accesses);
                     uint64_t end = pal_now_ns();
 
                     g_mem_sink = sink;
                     if (end <= begin) {
                         end = begin + 1u;
                     }
-                    samples[repeat] = (double)(end - begin) / (double)(size_t)MEM_ASSOC_ACCESSES;
+                    samples[repeat] = (double)(end - begin) / (double)accesses;
                 }
                 mem_cool(cfg);
 
                 latencies[stride_index][node_count - 1u] =
-                    stats_percentile(samples, MEM_ASSOC_REPEATS, STATS_NOISE_PERCENTILE);
+                    stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
 
                 tty_csv_row(cfg, "mem,assoc,%zu,%zu,%.3f", stride, node_count,
                             latencies[stride_index][node_count - 1u]);
@@ -790,6 +895,7 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
     }
 
     mem_canary_finish(cfg, baseline);
+    mem_publish_assoc(latencies, limits, stride_count);
     mem_assoc_table(cfg, latencies, limits, stride_count);
     status = LB_STATUS_OK;
 
@@ -838,6 +944,8 @@ lb_status_t mem_prefetch_run(const lb_cfg_t *cfg)
     size_t *indices = NULL;
     double results[MEM_PREFETCH_CASES] = {0.0};
     double samples[MEM_PREFETCH_REPEATS] = {0.0};
+    size_t accesses = 0u;
+    size_t repeats = 0u;
     mem_pattern_t patterns[MEM_PREFETCH_CASES] = {{0}};
     size_t buffer_bytes = 0u;
     size_t node_count = 0u;
@@ -850,9 +958,13 @@ lb_status_t mem_prefetch_run(const lb_cfg_t *cfg)
         return LB_STATUS_INVALID_ARG;
     }
 
+    accesses = cfg->fast ? MEM_PREFETCH_FAST_ACCESSES : MEM_PREFETCH_ACCESSES;
+    repeats = cfg->fast ? MEM_PREFETCH_FAST_REPEATS : MEM_PREFETCH_REPEATS;
+
     mem_apply_runtime(cfg);
 
-    buffer_bytes = mem_arena_cap(cfg, MEM_PREFETCH_MAX_BYTES, true);
+    buffer_bytes =
+        mem_arena_cap(cfg, cfg->fast ? MEM_PREFETCH_FAST_MAX_BYTES : MEM_PREFETCH_MAX_BYTES, true);
     if (buffer_bytes < MEM_MIN_ARENA_BYTES) {
         tty_err("memory budget is too small for mem prefetch");
         return LB_STATUS_NOMEM;
@@ -908,7 +1020,7 @@ lb_status_t mem_prefetch_run(const lb_cfg_t *cfg)
 
         (void)tty_format_bytes((uint64_t)buffer_bytes, human, sizeof(human));
         tty_kv(cfg, "Buffer", "%s", human);
-        tty_kv(cfg, "Accesses / repeats", "%u / %u", MEM_PREFETCH_ACCESSES, MEM_PREFETCH_REPEATS);
+        tty_kv(cfg, "Accesses / repeats", "%zu / %zu", accesses, repeats);
     }
 
     tty_csv_row(cfg, "mem,prefetch,variant,ns_per_access");
@@ -918,26 +1030,25 @@ lb_status_t mem_prefetch_run(const lb_cfg_t *cfg)
     for (case_index = 0u; case_index < MEM_PREFETCH_CASES; case_index++) {
         size_t repeat = 0u;
 
-        for (repeat = 0u; repeat < MEM_PREFETCH_REPEATS; repeat++) {
+        for (repeat = 0u; repeat < repeats; repeat++) {
             if (patterns[case_index].random) {
                 const uint64_t begin = pal_now_ns();
-                const uint64_t sink = mem_chase_hops(nodes, MEM_PREFETCH_ACCESSES);
+                const uint64_t sink = mem_chase_hops(nodes, accesses);
                 uint64_t end = pal_now_ns();
 
                 g_mem_sink = sink;
                 if (end <= begin) {
                     end = begin + 1u;
                 }
-                samples[repeat] = (double)(end - begin) / (double)(size_t)MEM_PREFETCH_ACCESSES;
+                samples[repeat] = (double)(end - begin) / (double)accesses;
             } else {
-                samples[repeat] = mem_pattern_ns_per_access(
-                    buf, buffer_bytes, &patterns[case_index], MEM_PREFETCH_ACCESSES);
+                samples[repeat] =
+                    mem_pattern_ns_per_access(buf, buffer_bytes, &patterns[case_index], accesses);
             }
         }
         mem_cool(cfg);
 
-        results[case_index] =
-            stats_percentile(samples, MEM_PREFETCH_REPEATS, STATS_NOISE_PERCENTILE);
+        results[case_index] = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
         tty_csv_row(cfg, "mem,prefetch,%s,%.3f", patterns[case_index].name, results[case_index]);
     }
 

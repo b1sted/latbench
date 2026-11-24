@@ -12,6 +12,7 @@
 #include "defs.h"
 #include "pal/compiler.h"
 #include "pal/pal.h"
+#include "passport.h"
 #include "stats.h"
 #include "tty.h"
 #include "types.h"
@@ -43,6 +44,12 @@
 #define BR_BTB_REPEATS 3u
 #define BR_BTB_JUMP_PCT 10.0
 #define BR_BTB_COUNT_COUNT 7u
+
+/* Compact auto mode: fewer iterations and repeats. */
+#define BR_FAST_REPEATS 2u
+#define BR_HIST_FAST_ITERATIONS UINT64_C(1000000)
+#define BR_RSB_FAST_ITERATIONS UINT64_C(50000)
+#define BR_BTB_FAST_CALLS UINT64_C(1048576)
 
 typedef uint64_t (*br_rsb_fn_t)(uint64_t depth, uint64_t acc);
 typedef uint64_t (*br_btb_fn_t)(uint64_t acc);
@@ -189,16 +196,17 @@ static double br_hist_measure(const lb_cfg_t *cfg, const uint8_t *pattern, uint6
                               size_t mask)
 {
     double samples[BR_HIST_REPEATS] = {0.0};
+    const uint64_t iterations = cfg->fast ? BR_HIST_FAST_ITERATIONS : BR_HIST_ITERATIONS;
+    const size_t repeats = cfg->fast ? BR_FAST_REPEATS : BR_HIST_REPEATS;
     size_t repeat = 0u;
 
     (void)br_hist_walk(pattern, BR_HIST_WARMUP, seed, mask);
-    for (repeat = 0u; repeat < BR_HIST_REPEATS; repeat++) {
-        samples[repeat] =
-            br_hist_sample(pattern, BR_HIST_ITERATIONS, seed + (uint64_t)repeat, mask);
+    for (repeat = 0u; repeat < repeats; repeat++) {
+        samples[repeat] = br_hist_sample(pattern, iterations, seed + (uint64_t)repeat, mask);
     }
     br_cool(cfg);
 
-    return stats_percentile(samples, BR_HIST_REPEATS, STATS_NOISE_PERCENTILE);
+    return stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
 }
 
 lb_status_t br_hist_run(const lb_cfg_t *cfg)
@@ -220,7 +228,9 @@ lb_status_t br_hist_run(const lb_cfg_t *cfg)
     tty_csv_row(cfg, "branch,hist,pattern,ns_per_branch,delta_ns,delta_pct");
     tty_section(cfg, "Branch history");
     tty_kv(cfg, "Pattern", "periodic 0/1, period 2 .. 4096 branches");
-    tty_kv(cfg, "Iterations / repeats", "%" PRIu64 " / %u", BR_HIST_ITERATIONS, BR_HIST_REPEATS);
+    tty_kv(cfg, "Iterations / repeats", "%" PRIu64 " / %u",
+           cfg->fast ? BR_HIST_FAST_ITERATIONS : BR_HIST_ITERATIONS,
+           cfg->fast ? BR_FAST_REPEATS : BR_HIST_REPEATS);
     tty_header(cfg, "  %-10s %12s %12s %10s", "Pattern", "ns/branch", "delta ns", "delta");
 
     baseline = stats_canary_baseline(BR_CANARY_MS);
@@ -291,10 +301,12 @@ lb_status_t br_hist_run(const lb_cfg_t *cfg)
         peak_delta = random_delta;
     }
     if (peak_delta > 0.0) {
+        lb_passport_mutable()->mispredict_ns = peak_delta * 2.0;
         tty_header(cfg, "  Mispredict penalty: ~%.2f ns (2 x peak delta %.2f ns)", peak_delta * 2.0,
                    peak_delta);
         tty_csv_row(cfg, "branch,hist,mispredict_penalty,%.4f,ns", peak_delta * 2.0);
     } else {
+        lb_passport_mutable()->mispredict_ns = 0.0;
         tty_header(cfg, "  Mispredict penalty: below measurement noise");
         tty_csv_row(cfg, "branch,hist,mispredict_penalty,0.0000,ns");
     }
@@ -353,12 +365,17 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
     double base_ns = 0.0;
     size_t threshold_index = 0u;
     bool threshold_found = false;
+    uint64_t iterations = 0u;
+    size_t repeats = 0u;
     uint64_t baseline = 0u;
     size_t index = 0u;
 
     if (cfg == NULL) {
         return LB_STATUS_INVALID_ARG;
     }
+
+    iterations = cfg->fast ? BR_RSB_FAST_ITERATIONS : BR_RSB_ITERATIONS;
+    repeats = cfg->fast ? BR_FAST_REPEATS : BR_RSB_REPEATS;
 
     br_apply_runtime(cfg);
 
@@ -368,7 +385,7 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
     tty_csv_row(cfg, "branch,rsb,depth,ns_per_call,delta_pct");
     tty_section(cfg, "Return-stack buffer");
     tty_kv(cfg, "Recursion", "noinline chain through a volatile function pointer");
-    tty_kv(cfg, "Iterations / repeats", "%" PRIu64 " / %u", BR_RSB_ITERATIONS, BR_RSB_REPEATS);
+    tty_kv(cfg, "Iterations / repeats", "%" PRIu64 " / %zu", iterations, repeats);
     tty_header(cfg, "  %7s %14s %12s %10s", "Depth", "Calls/top", "ns/call", "delta");
 
     baseline = stats_canary_baseline(BR_CANARY_MS);
@@ -380,13 +397,13 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
         double delta_pct = 0.0;
         size_t repeat = 0u;
 
-        (void)br_rsb_walk(&g_br_rsb_entry, depth, BR_RSB_WARMUP);
-        for (repeat = 0u; repeat < BR_RSB_REPEATS; repeat++) {
-            samples[repeat] = br_rsb_sample(depth, BR_RSB_ITERATIONS);
+        (void)br_rsb_walk(&g_br_rsb_entry, depth, iterations / 10u);
+        for (repeat = 0u; repeat < repeats; repeat++) {
+            samples[repeat] = br_rsb_sample(depth, iterations);
         }
         br_cool(cfg);
 
-        ns_per_call = stats_percentile(samples, BR_RSB_REPEATS, STATS_NOISE_PERCENTILE);
+        ns_per_call = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
         if (index == 0u) {
             base_ns = ns_per_call;
         } else if (base_ns > 0.0) {
@@ -403,11 +420,13 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
     }
 
     if (threshold_found) {
+        lb_passport_mutable()->rsb_frames = BR_RSB_DEPTHS[threshold_index - 1u];
         tty_header(cfg, "  RSB threshold: ~%" PRIu64 " frames (next depth +%.0f%%)",
                    BR_RSB_DEPTHS[threshold_index - 1u], BR_RSB_JUMP_PCT);
         tty_csv_row(cfg, "branch,rsb,threshold,%" PRIu64 ",frames",
                     BR_RSB_DEPTHS[threshold_index - 1u]);
     } else {
+        lb_passport_mutable()->rsb_frames = BR_RSB_DEPTHS[BR_RSB_DEPTH_COUNT - 1u];
         tty_header(cfg, "  RSB threshold: beyond %" PRIu64 " frames",
                    BR_RSB_DEPTHS[BR_RSB_DEPTH_COUNT - 1u]);
         tty_csv_row(cfg, "branch,rsb,threshold,%" PRIu64 ",frames",
@@ -596,6 +615,8 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
     double base_ns = 0.0;
     size_t threshold_index = 0u;
     bool threshold_found = false;
+    uint64_t calls = 0u;
+    size_t repeats = 0u;
     uint64_t baseline = 0u;
     size_t index = 0u;
 
@@ -603,31 +624,34 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
         return LB_STATUS_INVALID_ARG;
     }
 
+    calls = cfg->fast ? BR_BTB_FAST_CALLS : BR_BTB_CALLS;
+    repeats = cfg->fast ? BR_FAST_REPEATS : BR_BTB_REPEATS;
+
     br_apply_runtime(cfg);
 
     tty_csv_row(cfg, "branch,btb,functions,ns_per_call,delta_pct");
     tty_section(cfg, "Branch target buffer");
     tty_kv(cfg, "Trampolines", "16 .. 1024 unique noinline targets");
-    tty_kv(cfg, "Calls / repeats", "%" PRIu64 " / %u", BR_BTB_CALLS, BR_BTB_REPEATS);
+    tty_kv(cfg, "Calls / repeats", "%" PRIu64 " / %zu", calls, repeats);
     tty_header(cfg, "  %9s %12s %10s", "Functions", "ns/call", "delta");
 
     baseline = stats_canary_baseline(BR_CANARY_MS);
 
     for (index = 0u; index < BR_BTB_COUNT_COUNT; index++) {
         const size_t count = BR_BTB_COUNTS[index];
-        const uint64_t iterations = BR_BTB_CALLS / (uint64_t)count;
+        const uint64_t iterations = calls / (uint64_t)count;
         double samples[BR_BTB_REPEATS] = {0.0};
         double ns_per_call = 0.0;
         double delta_pct = 0.0;
         size_t repeat = 0u;
 
         (void)br_btb_walk(count, iterations / 8u);
-        for (repeat = 0u; repeat < BR_BTB_REPEATS; repeat++) {
+        for (repeat = 0u; repeat < repeats; repeat++) {
             samples[repeat] = br_btb_sample(count, iterations);
         }
         br_cool(cfg);
 
-        ns_per_call = stats_percentile(samples, BR_BTB_REPEATS, STATS_NOISE_PERCENTILE);
+        ns_per_call = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
         if (index == 0u) {
             base_ns = ns_per_call;
         } else if (base_ns > 0.0) {
@@ -643,10 +667,12 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
     }
 
     if (threshold_found) {
+        lb_passport_mutable()->btb_targets = BR_BTB_COUNTS[threshold_index - 1u];
         tty_header(cfg, "  BTB / L1i capacity: ~%zu targets (next count +%.0f%%)",
                    BR_BTB_COUNTS[threshold_index - 1u], BR_BTB_JUMP_PCT);
         tty_csv_row(cfg, "branch,btb,capacity,%zu,targets", BR_BTB_COUNTS[threshold_index - 1u]);
     } else {
+        lb_passport_mutable()->btb_targets = BR_BTB_COUNTS[BR_BTB_COUNT_COUNT - 1u];
         tty_header(cfg, "  BTB / L1i capacity: beyond %zu targets",
                    BR_BTB_COUNTS[BR_BTB_COUNT_COUNT - 1u]);
         tty_csv_row(cfg, "branch,btb,capacity,%zu,targets", BR_BTB_COUNTS[BR_BTB_COUNT_COUNT - 1u]);

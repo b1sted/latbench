@@ -5,16 +5,22 @@
 /* NOLINTEND(bugprone-reserved-identifier, readability-identifier-naming) */
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <time.h>
 
+#include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
+#include "pal/compiler.h"
 #include "pal/pal.h"
+#include "pal/pal_os.h"
 #include "pal_internal.h"
 
 bool pal_is_tty(bool use_stderr)
@@ -198,6 +204,733 @@ lb_status_t pal_thread_join(pal_thread_t *t)
     }
 
     free(t);
+    return LB_STATUS_OK;
+}
+
+/* ------------------------------------------------------ operating-system probes */
+
+#define PAL_OS_SYSCALL_WARMUP 1000u
+#define PAL_OS_SD_MAX_THREADS 7u
+#define PAL_OS_SD_READY_TIMEOUT_NS UINT64_C(1000000000)
+
+static volatile sig_atomic_t g_pal_os_sig_count = 0;
+
+static void pal_os_sig_handler(int signo)
+{
+    (void)signo;
+    g_pal_os_sig_count++;
+}
+
+lb_status_t pal_os_syscall_probe(uint32_t calls, pal_os_syscall_result_t *out)
+{
+    int fd = -1;
+    uint8_t byte = 0x5au;
+    uint64_t last = 0u;
+    uint64_t start = 0u;
+    uint64_t end = 0u;
+    uint32_t i = 0u;
+    lb_status_t status = LB_STATUS_ERROR;
+
+    if (out == NULL || calls == 0u) {
+        return LB_STATUS_INVALID_ARG;
+    }
+    out->timer_ns = 0u;
+    out->syscall_ns = 0u;
+    out->calls = 0u;
+
+    fd = open("/dev/null", O_WRONLY);
+    if (fd < 0) {
+        goto cleanup;
+    }
+
+    for (i = 0u; i < PAL_OS_SYSCALL_WARMUP; i++) {
+        last = pal_now_ns();
+        if (write(fd, &byte, 1u) != 1) {
+            goto cleanup;
+        }
+    }
+    PAL_KEEP_INT(last);
+
+    start = pal_now_ns();
+    for (i = 0u; i < calls; i++) {
+        last = pal_now_ns();
+        PAL_BARRIER();
+    }
+    end = pal_now_ns();
+    PAL_KEEP_INT(last);
+    out->timer_ns = (end >= start) ? (end - start) : 0u;
+
+    start = pal_now_ns();
+    for (i = 0u; i < calls; i++) {
+        if (write(fd, &byte, 1u) != 1) {
+            goto cleanup;
+        }
+    }
+    end = pal_now_ns();
+    out->syscall_ns = (end >= start) ? (end - start) : 0u;
+    out->calls = (uint64_t)calls;
+    status = LB_STATUS_OK;
+
+cleanup:
+    if (fd >= 0) {
+        close(fd);
+    }
+    return status;
+}
+
+typedef struct pal_os_pipe_ctx_t {
+    int request_fd;
+    int response_fd;
+    uint32_t rounds;
+    uint32_t completed;
+} pal_os_pipe_ctx_t;
+
+static void pal_os_pipe_worker(pal_os_pipe_ctx_t *ctx)
+{
+    uint8_t token = 0u;
+    uint32_t i = 0u;
+
+    if (ctx == NULL) {
+        return;
+    }
+
+    for (i = 0u; i < ctx->rounds; i++) {
+        ssize_t count = read(ctx->request_fd, &token, 1u);
+
+        if (count != 1) {
+            break;
+        }
+        token = (uint8_t)(token + 1u);
+        count = write(ctx->response_fd, &token, 1u);
+        if (count != 1) {
+            break;
+        }
+        ctx->completed++;
+    }
+}
+
+static void pal_os_pipe_thread_main(void *arg)
+{
+    pal_os_pipe_worker(arg);
+}
+
+lb_status_t pal_os_ctx_thread(uint32_t round_trips, pal_os_ctx_result_t *out)
+{
+    int request[2] = {-1, -1};
+    int response[2] = {-1, -1};
+    pal_os_pipe_ctx_t ctx = {0};
+    pal_thread_t *thread = NULL;
+    uint8_t token = 0u;
+    uint64_t start = 0u;
+    uint64_t end = 0u;
+    uint32_t i = 0u;
+    uint32_t completed = 0u;
+    lb_status_t status = LB_STATUS_ERROR;
+
+    if (out == NULL || round_trips == 0u) {
+        return LB_STATUS_INVALID_ARG;
+    }
+    out->elapsed_ns = 0u;
+    out->switches = 0u;
+
+    if (pipe(request) != 0) {
+        goto cleanup;
+    }
+    if (pipe(response) != 0) {
+        goto cleanup;
+    }
+
+    ctx.request_fd = request[0];
+    ctx.response_fd = response[1];
+    ctx.rounds = round_trips;
+    ctx.completed = 0u;
+
+    thread = pal_thread_spawn(pal_os_pipe_thread_main, &ctx, -1, false);
+    if (thread == NULL) {
+        goto cleanup;
+    }
+
+    start = pal_now_ns();
+    for (i = 0u; i < round_trips; i++) {
+        if (write(request[1], &token, 1u) != 1) {
+            break;
+        }
+        if (read(response[0], &token, 1u) != 1) {
+            break;
+        }
+        completed++;
+    }
+    end = pal_now_ns();
+
+    close(request[1]);
+    request[1] = -1;
+    if (pal_thread_join(thread) == LB_STATUS_OK) {
+        thread = NULL;
+    } else {
+        goto cleanup;
+    }
+
+    if (completed == 0u) {
+        goto cleanup;
+    }
+    out->elapsed_ns = (end >= start) ? (end - start) : 0u;
+    out->switches = (uint64_t)completed * 2u;
+    status = LB_STATUS_OK;
+
+cleanup:
+    if (request[1] >= 0) {
+        close(request[1]);
+        request[1] = -1;
+    }
+    if (thread != NULL) {
+        (void)pal_thread_join(thread);
+    }
+    if (request[0] >= 0) {
+        close(request[0]);
+    }
+    if (response[0] >= 0) {
+        close(response[0]);
+    }
+    if (response[1] >= 0) {
+        close(response[1]);
+    }
+    return status;
+}
+
+lb_status_t pal_os_ctx_proc(uint32_t round_trips, pal_os_ctx_result_t *out)
+{
+    int request[2] = {-1, -1};
+    int response[2] = {-1, -1};
+    pid_t pid = -1;
+    uint8_t token = 0u;
+    uint64_t start = 0u;
+    uint64_t end = 0u;
+    uint32_t i = 0u;
+    uint32_t completed = 0u;
+    int wait_status = 0;
+    lb_status_t status = LB_STATUS_ERROR;
+
+    if (out == NULL || round_trips == 0u) {
+        return LB_STATUS_INVALID_ARG;
+    }
+    out->elapsed_ns = 0u;
+    out->switches = 0u;
+
+    if (pipe(request) != 0) {
+        goto cleanup;
+    }
+    if (pipe(response) != 0) {
+        goto cleanup;
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        goto cleanup;
+    }
+    if (pid == 0) {
+        pal_os_pipe_ctx_t child_ctx = {0};
+
+        close(request[1]);
+        close(response[0]);
+        child_ctx.request_fd = request[0];
+        child_ctx.response_fd = response[1];
+        child_ctx.rounds = round_trips;
+        pal_os_pipe_worker(&child_ctx);
+        _exit(0);
+    }
+
+    close(request[0]);
+    request[0] = -1;
+    close(response[1]);
+    response[1] = -1;
+
+    start = pal_now_ns();
+    for (i = 0u; i < round_trips; i++) {
+        if (write(request[1], &token, 1u) != 1) {
+            break;
+        }
+        if (read(response[0], &token, 1u) != 1) {
+            break;
+        }
+        completed++;
+    }
+    end = pal_now_ns();
+
+    close(request[1]);
+    request[1] = -1;
+
+    while (waitpid(pid, &wait_status, 0) < 0) {
+        if (errno != EINTR) {
+            goto cleanup;
+        }
+    }
+    pid = -1;
+
+    if (!WIFEXITED(wait_status) || WEXITSTATUS(wait_status) != 0) {
+        goto cleanup;
+    }
+    if (completed == 0u) {
+        goto cleanup;
+    }
+
+    out->elapsed_ns = (end >= start) ? (end - start) : 0u;
+    out->switches = (uint64_t)completed * 2u;
+    status = LB_STATUS_OK;
+
+cleanup:
+    if (request[1] >= 0) {
+        close(request[1]);
+        request[1] = -1;
+    }
+    if (pid > 0) {
+        int child_status = 0;
+
+        while (waitpid(pid, &child_status, 0) < 0) {
+            if (errno != EINTR) {
+                break;
+            }
+        }
+    }
+    if (request[0] >= 0) {
+        close(request[0]);
+    }
+    if (response[0] >= 0) {
+        close(response[0]);
+    }
+    if (response[1] >= 0) {
+        close(response[1]);
+    }
+    return status;
+}
+
+typedef struct pal_os_wakeup_ctx_t {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    uint32_t rounds;
+    uint32_t completed;
+    uint32_t ready;
+    uint32_t turn;
+    uint32_t stop;
+} pal_os_wakeup_ctx_t;
+
+static void pal_os_wakeup_main(void *arg)
+{
+    pal_os_wakeup_ctx_t *ctx = arg;
+    uint32_t i = 0u;
+
+    if (ctx == NULL) {
+        return;
+    }
+    if (pthread_mutex_lock(&ctx->mutex) != 0) {
+        return;
+    }
+
+    ctx->ready = 1u;
+    (void)pthread_cond_signal(&ctx->cond);
+
+    for (i = 0u; i < ctx->rounds; i++) {
+        while (ctx->turn != 1u && ctx->stop == 0u) {
+            if (pthread_cond_wait(&ctx->cond, &ctx->mutex) != 0) {
+                ctx->stop = 1u;
+                break;
+            }
+        }
+        if (ctx->stop != 0u) {
+            break;
+        }
+        ctx->turn = 0u;
+        ctx->completed++;
+        (void)pthread_cond_signal(&ctx->cond);
+    }
+
+    (void)pthread_mutex_unlock(&ctx->mutex);
+}
+
+lb_status_t pal_os_wakeup(uint32_t round_trips, pal_os_wakeup_result_t *out)
+{
+    pal_os_wakeup_ctx_t ctx = {0};
+    pal_thread_t *thread = NULL;
+    bool mutex_ready = false;
+    bool cond_ready = false;
+    uint64_t start = 0u;
+    uint64_t end = 0u;
+    uint32_t i = 0u;
+    uint32_t completed = 0u;
+    lb_status_t status = LB_STATUS_ERROR;
+
+    if (out == NULL || round_trips == 0u) {
+        return LB_STATUS_INVALID_ARG;
+    }
+    out->elapsed_ns = 0u;
+    out->wakeups = 0u;
+
+    ctx.rounds = round_trips;
+    if (pthread_mutex_init(&ctx.mutex, NULL) != 0) {
+        goto cleanup;
+    }
+    mutex_ready = true;
+    if (pthread_cond_init(&ctx.cond, NULL) != 0) {
+        goto cleanup;
+    }
+    cond_ready = true;
+
+    thread = pal_thread_spawn(pal_os_wakeup_main, &ctx, -1, false);
+    if (thread == NULL) {
+        goto cleanup;
+    }
+
+    if (pthread_mutex_lock(&ctx.mutex) != 0) {
+        goto cleanup;
+    }
+    while (ctx.ready == 0u && ctx.stop == 0u) {
+        if (pthread_cond_wait(&ctx.cond, &ctx.mutex) != 0) {
+            ctx.stop = 1u;
+            break;
+        }
+    }
+
+    start = pal_now_ns();
+    for (i = 0u; i < round_trips; i++) {
+        ctx.turn = 1u;
+        (void)pthread_cond_signal(&ctx.cond);
+        while (ctx.turn != 0u && ctx.stop == 0u) {
+            if (pthread_cond_wait(&ctx.cond, &ctx.mutex) != 0) {
+                ctx.stop = 1u;
+                break;
+            }
+        }
+        if (ctx.stop != 0u || ctx.turn != 0u) {
+            break;
+        }
+        completed++;
+    }
+    end = pal_now_ns();
+
+    ctx.stop = 1u;
+    (void)pthread_cond_signal(&ctx.cond);
+    (void)pthread_mutex_unlock(&ctx.mutex);
+
+    if (pal_thread_join(thread) == LB_STATUS_OK) {
+        thread = NULL;
+    } else {
+        goto cleanup;
+    }
+
+    if (completed == 0u) {
+        goto cleanup;
+    }
+    out->elapsed_ns = (end >= start) ? (end - start) : 0u;
+    out->wakeups = (uint64_t)completed * 2u;
+    status = LB_STATUS_OK;
+
+cleanup:
+    if (thread != NULL) {
+        if (pthread_mutex_lock(&ctx.mutex) == 0) {
+            ctx.stop = 1u;
+            (void)pthread_cond_signal(&ctx.cond);
+            (void)pthread_mutex_unlock(&ctx.mutex);
+        }
+        (void)pal_thread_join(thread);
+    }
+    if (cond_ready) {
+        (void)pthread_cond_destroy(&ctx.cond);
+    }
+    if (mutex_ready) {
+        (void)pthread_mutex_destroy(&ctx.mutex);
+    }
+    return status;
+}
+
+typedef struct pal_os_sd_ctx_t {
+    const volatile uint8_t *page;
+    uint32_t *stop;
+    uint32_t *ready;
+    uint32_t index;
+    uint64_t sink;
+} pal_os_sd_ctx_t;
+
+static void pal_os_sd_worker(void *arg)
+{
+    pal_os_sd_ctx_t *ctx = arg;
+    uint64_t sum = 0u;
+
+    if (ctx == NULL) {
+        return;
+    }
+
+    pal_atomic_store_u32(&ctx->ready[ctx->index], 1u);
+    while (pal_atomic_load_u32_relaxed(ctx->stop) == 0u) {
+        sum += (uint64_t)ctx->page[1];
+    }
+    ctx->sink = sum;
+}
+
+lb_status_t pal_os_shootdown(uint32_t iterations, pal_os_shootdown_result_t *out)
+{
+    const size_t page_size = pal_page_size();
+    const uint32_t cpu_count = pal_cpu_count();
+    pal_mem_t *arena = NULL;
+    uint8_t *base = NULL;
+    uint8_t *page = NULL;
+    volatile uint8_t *vpage = NULL;
+    uint32_t stop = 0u;
+    uint32_t ready[PAL_OS_SD_MAX_THREADS] = {0};
+    pal_os_sd_ctx_t contexts[PAL_OS_SD_MAX_THREADS] = {0};
+    pal_thread_t *threads[PAL_OS_SD_MAX_THREADS] = {0};
+    uint32_t background = 0u;
+    uint32_t i = 0u;
+    uint32_t completed = 0u;
+    uint64_t start = 0u;
+    uint64_t end = 0u;
+    uint64_t deadline = 0u;
+    lb_status_t status = LB_STATUS_ERROR;
+
+    if (out == NULL || iterations == 0u) {
+        return LB_STATUS_INVALID_ARG;
+    }
+    out->single_ns = 0u;
+    out->single_ops = 0u;
+    out->multi_ns = 0u;
+    out->multi_ops = 0u;
+    out->background_threads = 0u;
+    out->multi_skipped = false;
+
+    if (page_size < 2u || (page_size & (page_size - 1u)) != 0u || page_size > (SIZE_MAX / 2u)) {
+        return LB_STATUS_ERROR;
+    }
+
+    arena = pal_mem_alloc(page_size * 2u, PAL_MEM_NO_THP);
+    if (arena == NULL) {
+        goto cleanup;
+    }
+    base = pal_mem_data(arena);
+    if (base == NULL) {
+        goto cleanup;
+    }
+    page =
+        (uint8_t *)(((uintptr_t)base + (uintptr_t)page_size - 1u) & ~((uintptr_t)page_size - 1u));
+    vpage = page;
+    vpage[0] = 0x5au;
+    vpage[1] = 0xa5u;
+
+    start = pal_now_ns();
+    for (i = 0u; i < iterations; i++) {
+        if (mprotect(page, page_size, PROT_READ) != 0) {
+            break;
+        }
+        (void)vpage[0];
+        if (mprotect(page, page_size, PROT_READ | PROT_WRITE) != 0) {
+            break;
+        }
+        vpage[0] = (uint8_t)(vpage[0] + 1u);
+        completed++;
+    }
+    end = pal_now_ns();
+
+    if (completed == 0u) {
+        goto cleanup;
+    }
+    out->single_ns = (end >= start) ? (end - start) : 0u;
+    out->single_ops = (uint64_t)completed * 2u;
+
+    if (cpu_count < 2u) {
+        out->multi_skipped = true;
+        status = LB_STATUS_OK;
+        goto cleanup;
+    }
+
+    background = cpu_count - 1u;
+    if (background > PAL_OS_SD_MAX_THREADS) {
+        background = PAL_OS_SD_MAX_THREADS;
+    }
+    out->background_threads = background;
+
+    for (i = 0u; i < background; i++) {
+        contexts[i].page = vpage;
+        contexts[i].stop = &stop;
+        contexts[i].ready = ready;
+        contexts[i].index = i;
+        contexts[i].sink = 0u;
+        threads[i] = pal_thread_spawn(pal_os_sd_worker, &contexts[i], -1, false);
+        if (threads[i] == NULL) {
+            goto cleanup;
+        }
+    }
+
+    deadline = pal_now_ns() + PAL_OS_SD_READY_TIMEOUT_NS;
+    for (i = 0u; i < background; i++) {
+        while (pal_atomic_load_u32(&ready[i]) == 0u && pal_now_ns() < deadline) {
+            /* Wait for the worker to enter its page-access loop. */
+        }
+        if (pal_atomic_load_u32(&ready[i]) == 0u) {
+            goto cleanup;
+        }
+    }
+
+    completed = 0u;
+    start = pal_now_ns();
+    for (i = 0u; i < iterations; i++) {
+        if (mprotect(page, page_size, PROT_READ) != 0) {
+            break;
+        }
+        (void)vpage[0];
+        if (mprotect(page, page_size, PROT_READ | PROT_WRITE) != 0) {
+            break;
+        }
+        vpage[0] = (uint8_t)(vpage[0] + 1u);
+        completed++;
+    }
+    end = pal_now_ns();
+
+    if (completed == 0u) {
+        goto cleanup;
+    }
+    out->multi_ns = (end >= start) ? (end - start) : 0u;
+    out->multi_ops = (uint64_t)completed * 2u;
+    status = LB_STATUS_OK;
+
+cleanup:
+    pal_atomic_store_u32(&stop, 1u);
+    for (i = 0u; i < PAL_OS_SD_MAX_THREADS; i++) {
+        if (threads[i] != NULL) {
+            (void)pal_thread_join(threads[i]);
+            threads[i] = NULL;
+        }
+    }
+    pal_mem_free(arena);
+    return status;
+}
+
+lb_status_t pal_os_fork_once(uint32_t forks, pal_os_fork_result_t *out)
+{
+    uint64_t start = 0u;
+    uint64_t end = 0u;
+    uint32_t i = 0u;
+    uint32_t completed = 0u;
+    lb_status_t status = LB_STATUS_ERROR;
+
+    if (out == NULL || forks == 0u) {
+        return LB_STATUS_INVALID_ARG;
+    }
+    out->elapsed_ns = 0u;
+    out->forks = 0u;
+
+    start = pal_now_ns();
+    for (i = 0u; i < forks; i++) {
+        const pid_t pid = fork();
+        int wait_status = 0;
+
+        if (pid < 0) {
+            goto cleanup;
+        }
+        if (pid == 0) {
+            _exit(0);
+        }
+        while (waitpid(pid, &wait_status, 0) < 0) {
+            if (errno != EINTR) {
+                goto cleanup;
+            }
+        }
+        if (!WIFEXITED(wait_status) || WEXITSTATUS(wait_status) != 0) {
+            goto cleanup;
+        }
+        completed++;
+    }
+    end = pal_now_ns();
+
+    out->elapsed_ns = (end >= start) ? (end - start) : 0u;
+    out->forks = (uint64_t)completed;
+    status = LB_STATUS_OK;
+
+cleanup:
+    return status;
+}
+
+lb_status_t pal_os_sig_roundtrip(uint32_t signals, pal_os_sig_result_t *out)
+{
+    struct sigaction action = {0};
+    struct sigaction previous = {0};
+    uint64_t start = 0u;
+    uint64_t end = 0u;
+    uint32_t i = 0u;
+    uint32_t completed = 0u;
+    bool installed = false;
+    lb_status_t status = LB_STATUS_ERROR;
+
+    if (out == NULL || signals == 0u) {
+        return LB_STATUS_INVALID_ARG;
+    }
+    out->elapsed_ns = 0u;
+    out->signals = 0u;
+
+    action.sa_handler = pal_os_sig_handler;
+    if (sigemptyset(&action.sa_mask) != 0) {
+        goto cleanup;
+    }
+    action.sa_flags = 0;
+    if (sigaction(SIGUSR1, &action, &previous) != 0) {
+        goto cleanup;
+    }
+    installed = true;
+    g_pal_os_sig_count = 0;
+
+    start = pal_now_ns();
+    for (i = 0u; i < signals; i++) {
+        if (pthread_kill(pthread_self(), SIGUSR1) != 0) {
+            break;
+        }
+        completed++;
+    }
+    end = pal_now_ns();
+
+    if (sigaction(SIGUSR1, &previous, NULL) != 0) {
+        goto cleanup;
+    }
+    installed = false;
+
+    if (completed == 0u || g_pal_os_sig_count == 0) {
+        goto cleanup;
+    }
+    out->elapsed_ns = (end >= start) ? (end - start) : 0u;
+    out->signals = (uint64_t)completed;
+    status = LB_STATUS_OK;
+
+cleanup:
+    if (installed) {
+        (void)sigaction(SIGUSR1, &previous, NULL);
+    }
+    return status;
+}
+
+lb_status_t pal_os_sleep_us(uint32_t target_us, uint32_t samples, uint64_t *samples_ns,
+                            size_t capacity, size_t *out_count)
+{
+    uint32_t i = 0u;
+
+    if (target_us == 0u || samples == 0u || samples_ns == NULL || out_count == NULL ||
+        capacity < (size_t)samples) {
+        return LB_STATUS_INVALID_ARG;
+    }
+    *out_count = 0u;
+
+    for (i = 0u; i < samples; i++) {
+        struct timespec request = {0, 0};
+        struct timespec remaining = {0, 0};
+        const uint64_t start = pal_now_ns();
+        uint64_t end = 0u;
+
+        request.tv_sec = (time_t)(target_us / 1000000u);
+        request.tv_nsec = (long)((target_us % 1000000u) * 1000u);
+        while (nanosleep(&request, &remaining) != 0) {
+            if (errno != EINTR) {
+                return LB_STATUS_ERROR;
+            }
+            request = remaining;
+        }
+        end = pal_now_ns();
+        samples_ns[i] = (end >= start) ? (end - start) : 0u;
+        (*out_count)++;
+    }
     return LB_STATUS_OK;
 }
 

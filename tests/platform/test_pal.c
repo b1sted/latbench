@@ -7,6 +7,7 @@
 
 #include "pal/compiler.h"
 #include "pal/pal.h"
+#include "pal/pal_os.h"
 
 #define PAL_TEST_THREAD_VALUE 0x5a5a5a5au
 
@@ -236,6 +237,110 @@ static void test_atomics(void)
                "relaxed atomic u32 CAS commits the new value");
 }
 
+static void test_os_syscall(void)
+{
+    pal_os_syscall_result_t result = {0};
+
+    check_true(pal_os_syscall_probe(64u, &result) == LB_STATUS_OK, "pal_os_syscall_probe succeeds");
+    check_true(result.calls == 64u, "pal_os_syscall_probe reports all calls");
+    check_true(result.timer_ns > 0u, "pal_os_syscall_probe times pal_now_ns");
+    check_true(result.syscall_ns > 0u, "pal_os_syscall_probe times write");
+    check_true(pal_os_syscall_probe(0u, &result) == LB_STATUS_INVALID_ARG,
+               "pal_os_syscall_probe rejects zero calls");
+}
+
+static void test_os_ctx_thread(void)
+{
+    pal_os_ctx_result_t result = {0};
+
+    check_true(pal_os_ctx_thread(8u, &result) == LB_STATUS_OK,
+               "pal_os_ctx_thread completes a pipe ping-pong");
+    check_true(result.switches == 16u, "pal_os_ctx_thread counts both handoffs per round trip");
+    check_true(result.elapsed_ns > 0u, "pal_os_ctx_thread measures a nonzero duration");
+    check_true(pal_os_ctx_thread(0u, &result) == LB_STATUS_INVALID_ARG,
+               "pal_os_ctx_thread rejects zero round trips");
+}
+
+static void test_os_ctx_proc(void)
+{
+    pal_os_ctx_result_t result = {0};
+
+    check_true(pal_os_ctx_proc(4u, &result) == LB_STATUS_OK,
+               "pal_os_ctx_proc completes a forked pipe ping-pong");
+    check_true(result.switches == 8u, "pal_os_ctx_proc counts both handoffs per round trip");
+    check_true(result.elapsed_ns > 0u, "pal_os_ctx_proc measures a nonzero duration");
+}
+
+static void test_os_wakeup(void)
+{
+    pal_os_wakeup_result_t result = {0};
+
+    check_true(pal_os_wakeup(8u, &result) == LB_STATUS_OK,
+               "pal_os_wakeup completes a scheduler ping-pong");
+    check_true(result.wakeups == 16u, "pal_os_wakeup counts both wakeups per round trip");
+    check_true(result.elapsed_ns > 0u, "pal_os_wakeup measures a nonzero duration");
+}
+
+static void test_os_shootdown(void)
+{
+    pal_os_shootdown_result_t result = {0};
+
+    check_true(pal_os_shootdown(16u, &result) == LB_STATUS_OK,
+               "pal_os_shootdown completes a single-thread run");
+    check_true(result.single_ops == 32u, "pal_os_shootdown counts both mprotect calls");
+    check_true(result.single_ns > 0u, "pal_os_shootdown measures a nonzero duration");
+    if (result.multi_skipped) {
+        printf("SKIP: pal_os_shootdown multi-thread needs at least 2 CPUs\n");
+    } else {
+        check_true(result.background_threads >= 1u, "pal_os_shootdown reports background threads");
+        check_true(result.multi_ops == 32u, "pal_os_shootdown multi-thread counts both calls");
+    }
+}
+
+static void test_os_fork(void)
+{
+    pal_os_fork_result_t result = {0};
+
+    check_true(pal_os_fork_once(2u, &result) == LB_STATUS_OK,
+               "pal_os_fork_once completes a fork batch");
+    check_true(result.forks == 2u, "pal_os_fork_once reports every reaped child");
+    check_true(result.elapsed_ns > 0u, "pal_os_fork_once measures a nonzero duration");
+}
+
+static void test_os_sig(void)
+{
+    pal_os_sig_result_t result = {0};
+
+    check_true(pal_os_sig_roundtrip(8u, &result) == LB_STATUS_OK,
+               "pal_os_sig_roundtrip delivers SIGUSR1 to itself");
+    check_true(result.signals == 8u, "pal_os_sig_roundtrip reports every delivery");
+    check_true(result.elapsed_ns > 0u, "pal_os_sig_roundtrip measures a nonzero duration");
+}
+
+static void test_os_sleep(void)
+{
+    uint64_t samples[3] = {0u, 0u, 0u};
+    size_t count = 0u;
+    size_t i = 0u;
+    bool nonzero = true;
+
+    check_true(pal_os_sleep_us(1u, 3u, samples, 3u, &count) == LB_STATUS_OK,
+               "pal_os_sleep_us handles a 1 us target");
+    check_true(count == 3u, "pal_os_sleep_us reports every sample");
+    for (i = 0u; i < count; i++) {
+        if (samples[i] == 0u) {
+            nonzero = false;
+        }
+    }
+    check_true(nonzero, "pal_os_sleep_us records nonzero elapsed time");
+
+    check_true(pal_os_sleep_us(100u, 2u, samples, 3u, &count) == LB_STATUS_OK,
+               "pal_os_sleep_us handles a 100 us target");
+    check_true(count == 2u, "pal_os_sleep_us respects the requested sample count");
+    check_true(pal_os_sleep_us(1u, 4u, samples, 3u, &count) == LB_STATUS_INVALID_ARG,
+               "pal_os_sleep_us rejects a capacity smaller than the sample count");
+}
+
 static void test_compiler_primitives(void)
 {
     const uint32_t values[4] = {1u, 2u, 3u, 4u};
@@ -271,6 +376,14 @@ int main(void)
     test_thread_lifecycle();
     test_thread_pinned();
     test_atomics();
+    test_os_syscall();
+    test_os_ctx_thread();
+    test_os_ctx_proc();
+    test_os_wakeup();
+    test_os_shootdown();
+    test_os_fork();
+    test_os_sig();
+    test_os_sleep();
     test_compiler_primitives();
 
     printf("test_pal: %d checks, %d failures\n", g_checks, g_failures);
