@@ -51,11 +51,20 @@ static const lb_subtest_t TLB_SUBTESTS[] = {
     {"fault", "first-touch page-fault latency versus a warm second pass", tlb_fault_run},
 };
 
+static const lb_subtest_t CORE_SUBTESTS[] = {
+    {"ilp", "dependent-chain throughput for ALU and FPU execution ports", core_ilp_run},
+    {"mlp", "parallel pointer-chase throughput and memory-level parallelism", core_mlp_run},
+    {"align", "unaligned read latency inside and across a cache line", core_align_run},
+    {"stlf", "store-to-load forwarding latency and 4K aliasing", core_stlf_run},
+};
+
 static const lb_module_t BENCH_MODULES[] = {
     {"sys", "system calibration and clock diagnostics", SYS_SUBTESTS, LB_ARRAY_SIZE(SYS_SUBTESTS)},
     {"mem", "cache size, line, associativity, and prefetcher probes", MEM_SUBTESTS,
      LB_ARRAY_SIZE(MEM_SUBTESTS)},
     {"tlb", "TLB capacity and page-fault latency", TLB_SUBTESTS, LB_ARRAY_SIZE(TLB_SUBTESTS)},
+    {"core", "pipeline ILP, MLP, alignment, and store-forwarding probes", CORE_SUBTESTS,
+     LB_ARRAY_SIZE(CORE_SUBTESTS)},
 };
 
 const lb_module_t *lb_bench_modules(size_t *count)

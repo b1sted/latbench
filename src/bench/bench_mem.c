@@ -44,21 +44,23 @@
 #define MEM_SIZE_AUTO_MAX_BYTES (UINT64_C(512) * UINT64_C(1024) * UINT64_C(1024))
 
 /*
- * mem line: two dependent loads per hop over 2 KiB blocks. The block start
+ * mem line: two dependent loads per hop over 512-byte blocks. The block start
  * holds the stride and the word at block + stride holds the next block, so a
  * stride below one cache line keeps both loads on the same line while larger
  * strides force a second line into the dependency chain.
  *
- * Each block base is rotated inside its 2 KiB slot by a multiple of 128 bytes.
- * That spreads successive blocks over different cache sets instead of letting
- * them collide on set bits 6..9, while keeping 128-byte alignment for the
- * 64 B vs 128 B stride comparison.
+ * A 64 MiB arena holds 131072 blocks, so even the single line touched per block
+ * at the smallest stride already covers 8 MiB and lands in RAM. That keeps the
+ * whole sweep memory-resident and avoids an L3 capacity transition obscuring
+ * the line-boundary jump. Each block base is rotated inside its 512-byte slot
+ * by 0 or 128 bytes, which preserves 128-byte alignment for the 64 B vs 128 B
+ * stride comparison.
  */
-#define MEM_LINE_BLOCK_BYTES 2048u
+#define MEM_LINE_BLOCK_BYTES 512u
 #define MEM_LINE_SKEW_BYTES 128u
-#define MEM_LINE_SKEW_SLOTS 8u
+#define MEM_LINE_SKEW_SLOTS 2u
 #define MEM_LINE_SKEW_MAX ((size_t)MEM_LINE_SKEW_BYTES * (MEM_LINE_SKEW_SLOTS - 1u))
-#define MEM_LINE_MAX_BYTES (UINT64_C(32) * UINT64_C(1024) * UINT64_C(1024))
+#define MEM_LINE_MAX_BYTES (UINT64_C(64) * UINT64_C(1024) * UINT64_C(1024))
 #define MEM_LINE_ACCESSES 524288u
 #define MEM_LINE_REPEATS 5u
 
@@ -99,7 +101,7 @@ static const size_t MEM_ASSOC_STRIDES[] = {
 
 static const size_t MEM_ASSOC_COLUMNS[] = {1u, 2u, 4u, 8u, 16u, 32u};
 
-static const size_t MEM_LINE_STEPS[] = {8u, 16u, 32u, 64u, 128u, 256u, 512u};
+static const size_t MEM_LINE_STEPS[] = {8u, 16u, 32u, 64u, 128u, 256u};
 
 /*
  * Volatile result sink. Every timed loop publishes its checksum here so the

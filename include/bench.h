@@ -62,4 +62,10 @@ lb_status_t mem_prefetch_run(const lb_cfg_t *cfg);
 lb_status_t tlb_size_run(const lb_cfg_t *cfg);
 lb_status_t tlb_fault_run(const lb_cfg_t *cfg);
 
+/* Pipeline and memory-level parallelism subtests, implemented in bench_core.c. */
+lb_status_t core_ilp_run(const lb_cfg_t *cfg);
+lb_status_t core_mlp_run(const lb_cfg_t *cfg);
+lb_status_t core_align_run(const lb_cfg_t *cfg);
+lb_status_t core_stlf_run(const lb_cfg_t *cfg);
+
 #endif /* LB_BENCH_H */
