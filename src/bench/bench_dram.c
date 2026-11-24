@@ -13,6 +13,7 @@
 #include "defs.h"
 #include "pal/compiler.h"
 #include "pal/pal.h"
+#include "passport.h"
 #include "stats.h"
 #include "tty.h"
 #include "types.h"
@@ -39,6 +40,12 @@
 #define DRAM_ROW_ACCESSES UINT64_C(1048576)
 #define DRAM_ROW_WARMUP UINT64_C(65536)
 #define DRAM_ROW_REPEATS 3u
+
+/* Compact auto mode: smaller arenas, fewer accesses and repeats. */
+#define DRAM_FAST_MAX_BYTES (UINT64_C(8) * UINT64_C(1024) * UINT64_C(1024))
+#define DRAM_BW_FAST_REPEATS 2u
+#define DRAM_ROW_FAST_ACCESSES UINT64_C(262144)
+#define DRAM_ROW_FAST_REPEATS 2u
 
 typedef struct dram_node_t {
     struct dram_node_t *next;
@@ -257,6 +264,7 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
     double read_gibs = 0.0;
     double write_gibs = 0.0;
     double copy_gibs = 0.0;
+    size_t repeats = 0u;
     uint64_t baseline = 0u;
     size_t repeat = 0u;
     lb_status_t status = LB_STATUS_NOMEM;
@@ -264,6 +272,7 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
     if (cfg == NULL) {
         return LB_STATUS_INVALID_ARG;
     }
+    repeats = cfg->fast ? DRAM_BW_FAST_REPEATS : DRAM_BW_REPEATS;
     if (page_size == 0u) {
         tty_err("cannot determine the system page size");
         return LB_STATUS_UNSUPPORTED;
@@ -271,7 +280,7 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
 
     dram_apply_runtime(cfg);
 
-    bytes = dram_arena_cap(cfg, DRAM_BW_MAX_BYTES, false);
+    bytes = dram_arena_cap(cfg, cfg->fast ? DRAM_FAST_MAX_BYTES : DRAM_BW_MAX_BYTES, false);
     if (bytes < DRAM_BW_MIN_BYTES) {
         tty_err("memory budget is too small for dram bw");
         return LB_STATUS_NOMEM;
@@ -306,7 +315,7 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
         tty_section(cfg, "DRAM bandwidth");
         tty_kv(cfg, "Buffer", "%s (copy uses two buffers)", human);
         tty_kv(cfg, "Words", "%zu", words);
-        tty_kv(cfg, "Repeats", "%u", DRAM_BW_REPEATS);
+        tty_kv(cfg, "Repeats", "%zu", repeats);
     }
     tty_header(cfg, "  %-8s %12s", "Pattern", "GiB/s");
     tty_csv_row(cfg, "dram,bw,pattern,gib_per_s");
@@ -318,22 +327,24 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
     (void)dram_bw_write(data_a, words, UINT64_C(0x517cc1b727220a95));
     (void)dram_bw_copy(data_b, data_a, words);
 
-    for (repeat = 0u; repeat < DRAM_BW_REPEATS; repeat++) {
+    for (repeat = 0u; repeat < repeats; repeat++) {
         read_samples[repeat] = dram_bw_read_sample(data_a, words);
     }
     dram_cool(cfg);
-    for (repeat = 0u; repeat < DRAM_BW_REPEATS; repeat++) {
+    for (repeat = 0u; repeat < repeats; repeat++) {
         write_samples[repeat] = dram_bw_write_sample(data_a, words);
     }
     dram_cool(cfg);
-    for (repeat = 0u; repeat < DRAM_BW_REPEATS; repeat++) {
+    for (repeat = 0u; repeat < repeats; repeat++) {
         copy_samples[repeat] = dram_bw_copy_sample(data_b, data_a, words);
     }
     dram_cool(cfg);
 
-    read_gibs = dram_best(read_samples, DRAM_BW_REPEATS);
-    write_gibs = dram_best(write_samples, DRAM_BW_REPEATS);
-    copy_gibs = dram_best(copy_samples, DRAM_BW_REPEATS);
+    read_gibs = dram_best(read_samples, repeats);
+    write_gibs = dram_best(write_samples, repeats);
+    copy_gibs = dram_best(copy_samples, repeats);
+    lb_passport_mutable()->dram_read_gibs = read_gibs;
+    lb_passport_mutable()->dram_write_gibs = write_gibs;
 
     tty_header(cfg, "  %-8s %12.2f", "read", read_gibs);
     tty_header(cfg, "  %-8s %12.2f", "write", write_gibs);
@@ -438,6 +449,8 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
     double cross_ns = 0.0;
     double delta_ns = 0.0;
     double delta_pct = 0.0;
+    uint64_t accesses = 0u;
+    size_t repeats = 0u;
     uint64_t baseline = 0u;
     size_t repeat = 0u;
     lb_status_t status = LB_STATUS_NOMEM;
@@ -445,6 +458,8 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
     if (cfg == NULL) {
         return LB_STATUS_INVALID_ARG;
     }
+    accesses = cfg->fast ? DRAM_ROW_FAST_ACCESSES : DRAM_ROW_ACCESSES;
+    repeats = cfg->fast ? DRAM_ROW_FAST_REPEATS : DRAM_ROW_REPEATS;
     if (page_size == 0u) {
         tty_err("cannot determine the system page size");
         return LB_STATUS_UNSUPPORTED;
@@ -457,7 +472,7 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
 
     dram_apply_runtime(cfg);
 
-    arena_bytes = dram_arena_cap(cfg, DRAM_ROW_MAX_BYTES, true);
+    arena_bytes = dram_arena_cap(cfg, cfg->fast ? DRAM_FAST_MAX_BYTES : DRAM_ROW_MAX_BYTES, true);
     arena_bytes = (arena_bytes / page_size) * page_size;
     page_count = arena_bytes / page_size;
     if (page_count < DRAM_ROW_MIN_PAGES) {
@@ -491,7 +506,7 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
         tty_kv(cfg, "Arena", "%s", human);
         tty_kv(cfg, "Pages / nodes", "%zu / %zu", page_count, node_count);
         tty_kv(cfg, "Node stride", "%u bytes", DRAM_ROW_NODE_BYTES);
-        tty_kv(cfg, "Accesses / repeats", "%" PRIu64 " / %u", DRAM_ROW_ACCESSES, DRAM_ROW_REPEATS);
+        tty_kv(cfg, "Accesses / repeats", "%" PRIu64 " / %zu", accesses, repeats);
     }
     tty_header(cfg, "  %-10s %14s", "Pattern", "ns/access");
     tty_csv_row(cfg, "dram,row,pattern,ns_per_access");
@@ -510,9 +525,9 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
     dram_row_order_same(order, page_order, inner, page_count);
     dram_row_link_sequence(nodes, order, node_count);
 
-    (void)dram_row_chase(&nodes[order[0]], DRAM_ROW_WARMUP);
-    for (repeat = 0u; repeat < DRAM_ROW_REPEATS; repeat++) {
-        same_samples[repeat] = dram_row_sample(&nodes[order[0]], DRAM_ROW_ACCESSES);
+    (void)dram_row_chase(&nodes[order[0]], DRAM_ROW_WARMUP / 4u);
+    for (repeat = 0u; repeat < repeats; repeat++) {
+        same_samples[repeat] = dram_row_sample(&nodes[order[0]], accesses);
     }
     dram_cool(cfg);
 
@@ -523,18 +538,20 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
     }
     dram_row_link_map(nodes, order, node_count);
 
-    (void)dram_row_chase(&nodes[0], DRAM_ROW_WARMUP);
-    for (repeat = 0u; repeat < DRAM_ROW_REPEATS; repeat++) {
-        cross_samples[repeat] = dram_row_sample(&nodes[0], DRAM_ROW_ACCESSES);
+    (void)dram_row_chase(&nodes[0], DRAM_ROW_WARMUP / 4u);
+    for (repeat = 0u; repeat < repeats; repeat++) {
+        cross_samples[repeat] = dram_row_sample(&nodes[0], accesses);
     }
     dram_cool(cfg);
 
-    same_ns = stats_percentile(same_samples, DRAM_ROW_REPEATS, STATS_NOISE_PERCENTILE);
-    cross_ns = stats_percentile(cross_samples, DRAM_ROW_REPEATS, STATS_NOISE_PERCENTILE);
+    same_ns = stats_percentile(same_samples, repeats, STATS_NOISE_PERCENTILE);
+    cross_ns = stats_percentile(cross_samples, repeats, STATS_NOISE_PERCENTILE);
     delta_ns = cross_ns - same_ns;
     if (same_ns > 0.0) {
         delta_pct = (delta_ns / same_ns) * 100.0;
     }
+    lb_passport_mutable()->row_delta_ns = delta_ns;
+    lb_passport_mutable()->row_delta_pct = delta_pct;
 
     tty_header(cfg, "  %-10s %14.2f", "same-row", same_ns);
     tty_header(cfg, "  %-10s %14.2f", "cross-row", cross_ns);

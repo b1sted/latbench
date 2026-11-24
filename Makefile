@@ -46,7 +46,8 @@ endif
 
 # Portable core sources are listed explicitly so link order stays deterministic.
 # Add new src/core/*.c files here as their modules are implemented.
-CORE_SRCS := src/core/main.c src/core/stats.c src/core/tty.c src/core/util.c
+CORE_SRCS := src/core/main.c src/core/stats.c src/core/tty.c src/core/util.c \
+	src/core/auto.c src/core/passport.c
 
 # Benchmark suites are listed explicitly so link order stays deterministic.
 # Add new src/bench/*.c files here as their modules are implemented.
@@ -78,7 +79,7 @@ PLATFORM_RELEASE_OBJS := $(PLATFORM_SRCS:%.c=$(RELEASE_OBJDIR)/%.o)
 PLATFORM_LEAKS_OBJS := $(PLATFORM_SRCS:%.c=$(LEAKS_OBJDIR)/%.o)
 
 TEST_SRCS := tests/core/test_stats.c tests/core/test_tty.c tests/core/test_util.c \
-	$(wildcard tests/platform/test_*.c)
+	tests/core/test_auto.c $(wildcard tests/platform/test_*.c)
 TEST_RELEASE_OBJS := $(patsubst tests/%.c,$(TEST_OBJDIR)/rel/tests/%.o,$(TEST_SRCS))
 TEST_LEAKS_OBJS := $(patsubst tests/%.c,$(LEAKS_OBJDIR)/tests/%.o,$(TEST_SRCS))
 TEST_BINS := $(patsubst tests/%.c,$(TEST_BINDIR)/rel/%,$(TEST_SRCS))

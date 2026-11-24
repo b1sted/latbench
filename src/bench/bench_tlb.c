@@ -12,6 +12,7 @@
 #include "defs.h"
 #include "pal/compiler.h"
 #include "pal/pal.h"
+#include "passport.h"
 #include "stats.h"
 #include "tty.h"
 #include "types.h"
@@ -48,6 +49,11 @@
 
 /* tlb fault: smallest arena worth measuring. */
 #define TLB_FAULT_MIN_PAGES 4u
+
+/* Compact auto mode: small arenas and fewer samples. */
+#define TLB_FAST_MAX_BYTES (UINT64_C(8) * UINT64_C(1024) * UINT64_C(1024))
+#define TLB_FAST_BATCH_MS 5u
+#define TLB_FAST_SAMPLES 3u
 
 typedef struct tlb_node_t {
     struct tlb_node_t *next;
@@ -108,6 +114,23 @@ static void tlb_cool(const lb_cfg_t *cfg)
     if (cfg->cool_ms > 0u) {
         pal_sleep_ms(cfg->cool_ms);
     }
+}
+
+static uint32_t tlb_batch_ms(const lb_cfg_t *cfg)
+{
+    uint32_t batch = 0u;
+
+    if (cfg == NULL) {
+        return 0u;
+    }
+    batch = cfg->batch_ms;
+    if (!cfg->fast) {
+        return batch;
+    }
+    if (batch == 0u || batch > TLB_FAST_BATCH_MS) {
+        batch = TLB_FAST_BATCH_MS;
+    }
+    return batch;
 }
 
 static void tlb_canary_finish(const lb_cfg_t *cfg, uint64_t baseline)
@@ -212,6 +235,8 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
     stats_series_t *series = NULL;
     stats_steps_t steps = {0};
     double samples[TLB_SIZE_SAMPLES] = {0.0};
+    size_t sample_count = 0u;
+    uint32_t batch_ms = 0u;
     const size_t page_size = pal_page_size();
     size_t arena_bytes = 0u;
     size_t max_pages = 0u;
@@ -223,6 +248,9 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
     if (cfg == NULL) {
         return LB_STATUS_INVALID_ARG;
     }
+
+    sample_count = cfg->fast ? TLB_FAST_SAMPLES : TLB_SIZE_SAMPLES;
+    batch_ms = tlb_batch_ms(cfg);
     if (page_size == 0u) {
         tty_err("cannot determine the system page size");
         return LB_STATUS_UNSUPPORTED;
@@ -230,7 +258,7 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
 
     tlb_apply_runtime(cfg);
 
-    arena_bytes = tlb_arena_cap(cfg, TLB_SIZE_MAX_BYTES, true);
+    arena_bytes = tlb_arena_cap(cfg, cfg->fast ? TLB_FAST_MAX_BYTES : TLB_SIZE_MAX_BYTES, true);
     max_pages = arena_bytes / page_size;
     if (max_pages > TLB_SIZE_MAX_PAGES) {
         max_pages = TLB_SIZE_MAX_PAGES;
@@ -268,7 +296,7 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
         tty_kv(cfg, "Page size", "%zu bytes", page_size);
         tty_kv(cfg, "Arena limit", "%s", human);
         tty_kv(cfg, "Pages", "%u .. %zu", TLB_SIZE_START_PAGES, max_pages);
-        tty_kv(cfg, "Batch / samples", "%" PRIu32 " ms / %u", cfg->batch_ms, TLB_SIZE_SAMPLES);
+        tty_kv(cfg, "Batch / samples", "%" PRIu32 " ms / %zu", batch_ms, sample_count);
     }
 
     baseline = stats_canary_baseline(TLB_CANARY_MS);
@@ -284,13 +312,12 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
             goto cleanup;
         }
 
-        for (sample = 0u; sample < TLB_SIZE_SAMPLES; sample++) {
-            samples[sample] =
-                tlb_size_sample((const tlb_node_t *)(const void *)base, cfg->batch_ms);
+        for (sample = 0u; sample < sample_count; sample++) {
+            samples[sample] = tlb_size_sample((const tlb_node_t *)(const void *)base, batch_ms);
         }
         tlb_cool(cfg);
 
-        status = stats_series_push(series, count * page_size, samples, TLB_SIZE_SAMPLES);
+        status = stats_series_push(series, count * page_size, samples, sample_count);
         if (status != LB_STATUS_OK) {
             goto cleanup;
         }
@@ -318,6 +345,13 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
     status = stats_series_detect_steps(series, &steps);
     if (status != LB_STATUS_OK) {
         goto cleanup;
+    }
+    if (steps.count > 0u && page_size > 0u) {
+        const uint64_t entries = (uint64_t)steps.items[0].x / (uint64_t)page_size;
+
+        if (entries <= (uint64_t)UINT32_MAX) {
+            lb_passport_mutable()->l1dtlb_entries = (uint32_t)entries;
+        }
     }
     status = tty_plot_series(cfg, series, &steps, TLB_SIZE_LEVELS, LB_ARRAY_SIZE(TLB_SIZE_LEVELS),
                              page_size);
@@ -389,7 +423,7 @@ lb_status_t tlb_fault_run(const lb_cfg_t *cfg)
 
     tlb_apply_runtime(cfg);
 
-    arena_bytes = tlb_arena_cap(cfg, TLB_FAULT_MAX_BYTES, false);
+    arena_bytes = tlb_arena_cap(cfg, cfg->fast ? TLB_FAST_MAX_BYTES : TLB_FAULT_MAX_BYTES, false);
     pages = arena_bytes / page_size;
     if (pages < TLB_FAULT_MIN_PAGES) {
         tty_err("memory budget is too small for tlb fault");

@@ -51,10 +51,26 @@ static bool g_tty_csv_matrix_header = false;
 
 static FILE *tty_info_stream(const lb_cfg_t *cfg)
 {
-    if (cfg != NULL && cfg->csv) {
+    if (cfg != NULL && (cfg->csv || cfg->auto_mode || cfg->quiet)) {
         return stderr;
     }
     return stdout;
+}
+
+/*
+ * Auto mode hides the per-probe detail so the final Passport card stays the
+ * only thing on stdout. Quiet mode suppresses informational output entirely.
+ * CSV mode is never suppressed: its records are the machine-readable result.
+ */
+static bool tty_info_suppressed(const lb_cfg_t *cfg)
+{
+    if (cfg == NULL) {
+        return false;
+    }
+    if (cfg->quiet) {
+        return true;
+    }
+    return cfg->auto_mode && !cfg->csv;
 }
 
 static bool tty_color_enabled(const lb_cfg_t *cfg, const FILE *stream)
@@ -100,7 +116,7 @@ void tty_header(const lb_cfg_t *cfg, const char *fmt, ...)
     va_list args;
     FILE *stream = NULL;
 
-    if (fmt == NULL) {
+    if (fmt == NULL || tty_info_suppressed(cfg)) {
         return;
     }
 
@@ -115,7 +131,7 @@ void tty_section(const lb_cfg_t *cfg, const char *title)
     FILE *stream = NULL;
     bool color = false;
 
-    if (title == NULL) {
+    if (title == NULL || tty_info_suppressed(cfg)) {
         return;
     }
 
@@ -139,7 +155,7 @@ void tty_kv(const lb_cfg_t *cfg, const char *key, const char *fmt, ...)
     va_list args;
     FILE *stream = NULL;
 
-    if (key == NULL || fmt == NULL) {
+    if (key == NULL || fmt == NULL || tty_info_suppressed(cfg)) {
         return;
     }
 
@@ -169,7 +185,7 @@ void tty_progress(const lb_cfg_t *cfg, const char *fmt, ...)
     va_list args;
     FILE *stream = NULL;
 
-    if (fmt == NULL) {
+    if (fmt == NULL || (cfg != NULL && cfg->quiet)) {
         return;
     }
 
@@ -508,6 +524,9 @@ lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
     if (series == NULL) {
         return LB_STATUS_INVALID_ARG;
     }
+    if (tty_info_suppressed(cfg)) {
+        return LB_STATUS_OK;
+    }
 
     label = stats_series_label(series);
     if (label == NULL || label[0] == '\0') {
@@ -647,6 +666,9 @@ lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint6
 
     if (latency_ns == NULL || count == 0u || count > (size_t)TTY_MATRIX_MAX_SIZE) {
         return LB_STATUS_INVALID_ARG;
+    }
+    if (tty_info_suppressed(cfg)) {
+        return LB_STATUS_OK;
     }
 
     tty_section(cfg, (title != NULL) ? title : "CPU latency matrix");

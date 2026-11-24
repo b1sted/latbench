@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "auto.h"
 #include "bench.h"
 #include "defs.h"
 #include "pal/compiler.h"
@@ -525,6 +526,7 @@ static void print_help(const lb_cfg_t *cfg)
     modules = lb_bench_modules(&module_count);
 
     tty_header(cfg, "Usage: latbench <module> <subtest> [OPTIONS]");
+    tty_header(cfg, "       latbench auto [OPTIONS]");
     tty_header(cfg, "%s", "");
 
     tty_section(cfg, "Runtime");
@@ -551,6 +553,10 @@ static void print_help(const lb_cfg_t *cfg)
     tty_section(cfg, "System");
     tty_header(cfg, HELP_FLAG_FMT, "-h, --help", "display this help and exit");
     tty_header(cfg, HELP_FLAG_FMT, "-V, --version", "output version information and exit");
+
+    tty_section(cfg, "Profiles");
+    tty_header(cfg, HELP_FLAG_FMT, "    auto",
+               "compact full-machine probes and a unified Passport card");
 
     tty_section(cfg, "Diagnostics");
     tty_header(cfg, HELP_FLAG_FMT, "    selftest",
@@ -763,6 +769,9 @@ int main(int argc, char **argv)
     cfg.write = false;
     cfg.throttle_long = false;
     cfg.topo_pingpong_cas = false;
+    cfg.fast = false;
+    cfg.auto_mode = false;
+    cfg.quiet = false;
     cfg.os_ctx_mode = LB_OS_CTX_BOTH;
 
     status = parse_args(argc, argv, &cfg, &show_help, &show_version, &module_name, &subtest_name);
@@ -800,6 +809,15 @@ int main(int argc, char **argv)
             return 2;
         }
         return (lb_selftest_run(&cfg) == LB_STATUS_OK) ? 0 : 1;
+    }
+
+    if (strcmp(module_name, "auto") == 0) {
+        if (subtest_name != NULL) {
+            tty_err("auto does not take a subtest");
+            print_help_to_stderr(&cfg);
+            return 2;
+        }
+        return (lb_auto_run(&cfg) == LB_STATUS_OK) ? 0 : 1;
     }
 
     if (subtest_name == NULL) {

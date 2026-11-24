@@ -12,6 +12,7 @@
 
 #include "pal/compiler.h"
 #include "pal/pal.h"
+#include "passport.h"
 #include "stats.h"
 #include "tty.h"
 #include "types.h"
@@ -38,6 +39,12 @@
 #define TOPO_PP_MAX_CPUS 64u
 #define TOPO_PP_TIME_CHECK_MASK UINT64_C(0x3f)
 #define TOPO_PP_STOP_SEQ UINT32_MAX
+
+/* Compact auto mode: fewer atomics and a small representative CPU subset. */
+#define TOPO_FAST_REPEATS 2u
+#define TOPO_ATOMIC_FAST_ITERATIONS UINT64_C(1000000)
+#define TOPO_PP_FAST_BATCH_MS 2u
+#define TOPO_PP_FAST_MAX_CPUS 8u
 
 static const size_t TOPO_FS_OFFSETS[TOPO_FS_OFFSET_COUNT] = {
     0u, 8u, 16u, 32u, 64u, 96u, 128u, 192u, 256u,
@@ -151,18 +158,19 @@ static PAL_NOINLINE uint64_t topo_atomic_fence_loop(uint64_t *cell, uint64_t ite
     return acc;
 }
 
-static double topo_atomic_measure(uint64_t (*fn)(uint64_t *, uint64_t), uint64_t *cell)
+static double topo_atomic_measure(uint64_t (*fn)(uint64_t *, uint64_t), uint64_t *cell,
+                                  uint64_t iterations, size_t repeats)
 {
     uint64_t best = UINT64_MAX;
     size_t repeat = 0u;
 
-    (void)fn(cell, TOPO_ATOMIC_WARMUP);
-    for (repeat = 0u; repeat < (size_t)TOPO_ATOMIC_REPEATS; repeat++) {
+    (void)fn(cell, iterations / 10u);
+    for (repeat = 0u; repeat < repeats; repeat++) {
         const uint64_t begin = pal_now_ns();
         uint64_t end = 0u;
         uint64_t elapsed = 0u;
 
-        (void)fn(cell, TOPO_ATOMIC_ITERATIONS);
+        (void)fn(cell, iterations);
         end = pal_now_ns();
         elapsed = (end > begin) ? (end - begin) : 0u;
         if (elapsed > 0u && elapsed < best) {
@@ -173,7 +181,7 @@ static double topo_atomic_measure(uint64_t (*fn)(uint64_t *, uint64_t), uint64_t
     if (best == UINT64_MAX) {
         return 0.0;
     }
-    return (double)best / (double)TOPO_ATOMIC_ITERATIONS;
+    return (double)best / (double)iterations;
 }
 
 lb_status_t topo_atomic_run(const lb_cfg_t *cfg)
@@ -181,24 +189,29 @@ lb_status_t topo_atomic_run(const lb_cfg_t *cfg)
     uint64_t cell = 0u;
     double fetch_ns = 0.0;
     double fence_ns = 0.0;
+    uint64_t iterations = 0u;
+    size_t repeats = 0u;
     uint64_t baseline = 0u;
 
     if (cfg == NULL) {
         return LB_STATUS_INVALID_ARG;
     }
 
+    iterations = cfg->fast ? TOPO_ATOMIC_FAST_ITERATIONS : TOPO_ATOMIC_ITERATIONS;
+    repeats = cfg->fast ? TOPO_FAST_REPEATS : TOPO_ATOMIC_REPEATS;
+
     topo_apply_runtime(cfg);
 
     tty_section(cfg, "Topology atomics");
-    tty_kv(cfg, "Iterations", "%" PRIu64, TOPO_ATOMIC_ITERATIONS);
-    tty_kv(cfg, "Repeats", "%u", TOPO_ATOMIC_REPEATS);
+    tty_kv(cfg, "Iterations", "%" PRIu64, iterations);
+    tty_kv(cfg, "Repeats", "%zu", repeats);
     tty_header(cfg, "  %-28s %12s", "Operation", "ns/op");
     tty_csv_row(cfg, "topo,atomic,operation,ns_per_op");
 
     baseline = stats_canary_baseline(TOPO_CANARY_MS);
 
-    fetch_ns = topo_atomic_measure(topo_atomic_fetch_add_loop, &cell);
-    fence_ns = topo_atomic_measure(topo_atomic_fence_loop, &cell);
+    fetch_ns = topo_atomic_measure(topo_atomic_fetch_add_loop, &cell, iterations, repeats);
+    fence_ns = topo_atomic_measure(topo_atomic_fence_loop, &cell, iterations, repeats);
 
     tty_header(cfg, "  %-28s %12.2f", "fetch_add_u64 (L1)", fetch_ns);
     tty_header(cfg, "  %-28s %12.2f", "fence_seq + dependent add", fence_ns);
@@ -322,6 +335,9 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
     if (batch_ms < TOPO_FS_MIN_BATCH_MS) {
         batch_ms = TOPO_FS_MIN_BATCH_MS;
     }
+    if (cfg->fast && batch_ms > TOPO_FS_MIN_BATCH_MS) {
+        batch_ms = TOPO_FS_MIN_BATCH_MS;
+    }
 
     arena = pal_mem_alloc(TOPO_FS_BUFFER_BYTES, PAL_MEM_NO_THP);
     if (arena == NULL) {
@@ -398,6 +414,7 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
     }
 
     line_bytes = topo_fs_estimate_line(samples, (size_t)TOPO_FS_OFFSET_COUNT);
+    lb_passport_mutable()->coherence_line_bytes = line_bytes;
     if (line_bytes == 0u) {
         tty_kv(cfg, "Coherence line", "not detected (no clear latency drop)");
     } else {
@@ -628,18 +645,58 @@ cleanup:
     return status;
 }
 
+static int topo_pp_compare_u64(const void *lhs, const void *rhs)
+{
+    const uint64_t a = *(const uint64_t *)lhs;
+    const uint64_t b = *(const uint64_t *)rhs;
+
+    if (a < b) {
+        return -1;
+    }
+    if (a > b) {
+        return 1;
+    }
+    return 0;
+}
+
+static void topo_pp_publish(const uint64_t *values, size_t count)
+{
+    uint64_t *sorted = NULL;
+    lb_passport_t *passport = lb_passport_mutable();
+
+    if (values == NULL || count == 0u || count > (SIZE_MAX / sizeof(*sorted))) {
+        return;
+    }
+    sorted = malloc(count * sizeof(*sorted));
+    if (sorted == NULL) {
+        return;
+    }
+    (void)memcpy(sorted, values, count * sizeof(*sorted));
+    qsort(sorted, count, sizeof(*sorted), topo_pp_compare_u64);
+    passport->pp_min_ns = sorted[0];
+    passport->pp_med_ns = sorted[count / 2u];
+    passport->pp_max_ns = sorted[count - 1u];
+    free(sorted);
+}
+
 static lb_status_t topo_pp_matrix(const lb_cfg_t *cfg, uint32_t cpu_count, bool cas_mode)
 {
     uint64_t *matrix = NULL;
+    uint64_t *pair_ns = NULL;
     size_t count = (size_t)cpu_count;
+    const uint32_t batch_ms = cfg->fast ? TOPO_PP_FAST_BATCH_MS : TOPO_PP_MATRIX_BATCH_MS;
+    const size_t max_count = cfg->fast ? (size_t)TOPO_PP_FAST_MAX_CPUS : (size_t)TOPO_PP_MAX_CPUS;
     size_t pairs = 0u;
+    size_t pair_index = 0u;
     size_t i = 0u;
     lb_status_t status = LB_STATUS_OK;
 
-    if (count > (size_t)TOPO_PP_MAX_CPUS) {
-        tty_warn("matrix limited to the first %u CPUs (found %" PRIu32 ")", TOPO_PP_MAX_CPUS,
-                 cpu_count);
-        count = (size_t)TOPO_PP_MAX_CPUS;
+    if (count > max_count) {
+        if (!cfg->fast) {
+            tty_warn("matrix limited to the first %zu CPUs (found %" PRIu32 ")", max_count,
+                     cpu_count);
+        }
+        count = max_count;
     }
     if (count > SIZE_MAX / count) {
         return LB_STATUS_NOMEM;
@@ -651,29 +708,43 @@ static lb_status_t topo_pp_matrix(const lb_cfg_t *cfg, uint32_t cpu_count, bool 
         return LB_STATUS_NOMEM;
     }
     pairs = count * (count - 1u) / 2u;
+    if (pairs > 0u) {
+        pair_ns = malloc(pairs * sizeof(*pair_ns));
+        if (pair_ns == NULL) {
+            tty_err("cannot allocate %zu ping-pong samples", pairs);
+            free(matrix);
+            return LB_STATUS_NOMEM;
+        }
+    }
 
     tty_section(cfg, "Topo ping-pong");
     tty_kv(cfg, "Mode", "%s token handoff", cas_mode ? "CAS" : "flag");
     tty_kv(cfg, "CPUs", "%zu", count);
-    tty_kv(cfg, "Pairs", "%zu (%u ms each)", pairs, TOPO_PP_MATRIX_BATCH_MS);
+    tty_kv(cfg, "Pairs", "%zu (%" PRIu32 " ms each)", pairs, batch_ms);
 
     for (i = 0u; i < count; i++) {
         for (size_t j = i + 1u; j < count; j++) {
             uint64_t one_way_ns = 0u;
 
-            status = topo_pp_run_pair((uint32_t)i, (uint32_t)j, true, true, TOPO_PP_MATRIX_BATCH_MS,
-                                      cas_mode, true, &one_way_ns);
+            status = topo_pp_run_pair((uint32_t)i, (uint32_t)j, true, true, batch_ms, cas_mode,
+                                      true, &one_way_ns);
             if (status != LB_STATUS_OK) {
                 goto cleanup;
             }
             matrix[i * count + j] = one_way_ns;
             matrix[j * count + i] = one_way_ns;
+            if (pair_ns != NULL) {
+                pair_ns[pair_index] = one_way_ns;
+                pair_index++;
+            }
         }
     }
 
+    topo_pp_publish(pair_ns, pair_index);
     status = tty_print_matrix(cfg, "One-way latency (RTT/2, ns)", matrix, count);
 
 cleanup:
+    free(pair_ns);
     free(matrix);
     return status;
 }
@@ -684,7 +755,13 @@ static lb_status_t topo_pp_mac_pairs(const lb_cfg_t *cfg, bool cas_mode)
     static const bool TOPO_PP_QOS_A[3] = {true, true, false};
     static const bool TOPO_PP_QOS_B[3] = {true, false, false};
     uint32_t batch_ms = (cfg->batch_ms > 0u) ? cfg->batch_ms : TOPO_PP_DEFAULT_BATCH_MS;
+    uint64_t values[3] = {0u, 0u, 0u};
+    size_t value_count = 0u;
     size_t i = 0u;
+
+    if (cfg->fast && batch_ms > TOPO_PP_FAST_BATCH_MS) {
+        batch_ms = TOPO_PP_FAST_BATCH_MS;
+    }
 
     tty_section(cfg, "Topo ping-pong");
     tty_kv(cfg, "Mode", "%s token handoff", cas_mode ? "CAS" : "flag");
@@ -703,8 +780,11 @@ static lb_status_t topo_pp_mac_pairs(const lb_cfg_t *cfg, bool cas_mode)
         }
         tty_header(cfg, "  %-6s %16" PRIu64, TOPO_PP_NAMES[i], one_way_ns);
         tty_csv_row(cfg, "topo,pingpong,%s,%" PRIu64, TOPO_PP_NAMES[i], one_way_ns);
+        values[value_count] = one_way_ns;
+        value_count++;
     }
 
+    topo_pp_publish(values, value_count);
     return LB_STATUS_OK;
 }
 
