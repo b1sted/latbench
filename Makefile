@@ -50,7 +50,8 @@ CORE_SRCS := src/core/main.c src/core/stats.c src/core/tty.c src/core/util.c
 
 # Benchmark suites are listed explicitly so link order stays deterministic.
 # Add new src/bench/*.c files here as their modules are implemented.
-BENCH_SRCS := src/bench/bench_sys.c src/bench/bench_mem.c src/bench/bench_tlb.c
+BENCH_SRCS := src/bench/bench_sys.c src/bench/bench_mem.c src/bench/bench_tlb.c \
+	src/bench/bench_core.c src/bench/bench_branch.c src/bench/bench_dram.c
 
 SRCS := $(CORE_SRCS) $(BENCH_SRCS)
 SRCS += $(PLATFORM_SRCS)
@@ -143,7 +144,9 @@ $(TEST_BINDIR)/asan/%: $(LEAKS_OBJDIR)/tests/%.o $(TEST_LINK_LEAKS_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) $(LEAKS_LDFLAGS) $^ $(LDLIBS) -o $@
 
-test: all $(TEST_BINS)
+# `$(BIN)` is the RELEASE_CFLAGS (-O2) build on purpose: the selftest verifies
+# that optimizer transformations did not fold the benchmark loops away.
+test: $(BIN) $(TEST_BINS)
 	@set -e; \
 	for test_bin in $(TEST_BINS); do \
 		echo "RUN $$test_bin"; \

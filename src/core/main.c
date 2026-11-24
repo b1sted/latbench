@@ -25,18 +25,38 @@
 #define LB_SELFTEST_CHASE_ROUNDS 3u
 #define LB_SELFTEST_RATIO_MIN 1.6
 
+/* Branch sanity: an unpredictable 50/50 pattern must pay a mispredict penalty. */
+#define LB_SELFTEST_BRANCH_PATTERN_BYTES 65536u
+#define LB_SELFTEST_BRANCH_ITERATIONS UINT64_C(4000000)
+#define LB_SELFTEST_BRANCH_WARMUP UINT64_C(200000)
+#define LB_SELFTEST_BRANCH_ROUNDS 3u
+#define LB_SELFTEST_BRANCH_RATIO_MIN 1.8
+
+/* Core ILP sanity: four independent chains must beat a single chain. */
+#define LB_SELFTEST_ILP_ITERATIONS UINT64_C(8000000)
+#define LB_SELFTEST_ILP_WARMUP UINT64_C(200000)
+#define LB_SELFTEST_ILP_ROUNDS 3u
+#define LB_SELFTEST_ILP_CHAINS 4u
+#define LB_SELFTEST_ILP_GAIN_MIN 1.5
+#define LB_SELFTEST_ILP_MUL UINT64_C(6364136223846793005)
+#define LB_SELFTEST_ILP_ADD UINT64_C(1)
+
 #define HELP_FLAG_FMT "  %-22s %s"
 
 typedef struct lb_selftest_node_t {
     struct lb_selftest_node_t *next;
 } lb_selftest_node_t;
 
-/* Published by the selftest chase so the optimizer keeps the dependent loads. */
+/* Published by the selftest probes so the optimizer keeps the dependent work. */
 static volatile uint64_t g_lb_selftest_sink = 0u;
+
+/* Branch-pattern storage shared by the constant and 50/50 sanity walks. */
+static uint8_t g_lb_selftest_branch_pattern[LB_SELFTEST_BRANCH_PATTERN_BYTES] = {0};
 
 static const lb_subtest_t SYS_SUBTESTS[] = {
     {"info", "platform limits and runtime settings", sys_info_run},
     {"timer", "clock resolution and pal_now_ns() overhead", sys_timer_run},
+    {"throttle", "5-10 s sustained-load turbo and throttle decay", sys_throttle_run},
 };
 
 static const lb_subtest_t MEM_SUBTESTS[] = {
@@ -51,11 +71,35 @@ static const lb_subtest_t TLB_SUBTESTS[] = {
     {"fault", "first-touch page-fault latency versus a warm second pass", tlb_fault_run},
 };
 
+static const lb_subtest_t CORE_SUBTESTS[] = {
+    {"ilp", "dependent-chain throughput for ALU and FPU execution ports", core_ilp_run},
+    {"mlp", "parallel pointer-chase throughput and memory-level parallelism", core_mlp_run},
+    {"align", "unaligned read latency inside and across a cache line", core_align_run},
+    {"stlf", "store-to-load forwarding latency and 4K aliasing", core_stlf_run},
+};
+
+static const lb_subtest_t BRANCH_SUBTESTS[] = {
+    {"hist", "predictor history and mispredict penalty from branch patterns", br_hist_run},
+    {"rsb", "return-stack buffer capacity from recursive call chains", br_rsb_run},
+    {"btb", "BTB and L1i capacity from indirect-call trampolines", br_btb_run},
+};
+
+static const lb_subtest_t DRAM_SUBTESTS[] = {
+    {"bw", "sequential read, write, and copy bandwidth", dram_bw_run},
+    {"row", "DRAM row-buffer locality versus random page switches", dram_row_run},
+};
+
 static const lb_module_t BENCH_MODULES[] = {
     {"sys", "system calibration and clock diagnostics", SYS_SUBTESTS, LB_ARRAY_SIZE(SYS_SUBTESTS)},
     {"mem", "cache size, line, associativity, and prefetcher probes", MEM_SUBTESTS,
      LB_ARRAY_SIZE(MEM_SUBTESTS)},
     {"tlb", "TLB capacity and page-fault latency", TLB_SUBTESTS, LB_ARRAY_SIZE(TLB_SUBTESTS)},
+    {"core", "pipeline ILP, MLP, alignment, and store-forwarding probes", CORE_SUBTESTS,
+     LB_ARRAY_SIZE(CORE_SUBTESTS)},
+    {"branch", "branch predictor, RSB, and BTB capacity probes", BRANCH_SUBTESTS,
+     LB_ARRAY_SIZE(BRANCH_SUBTESTS)},
+    {"dram", "memory bandwidth and DRAM row-buffer locality", DRAM_SUBTESTS,
+     LB_ARRAY_SIZE(DRAM_SUBTESTS)},
 };
 
 const lb_module_t *lb_bench_modules(size_t *count)
@@ -255,6 +299,172 @@ static bool lb_selftest_chase_check(const lb_cfg_t *cfg)
     return true;
 }
 
+static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t lb_selftest_branch_walk(const uint8_t *pattern,
+                                                                      uint64_t iterations)
+{
+    uint64_t a = UINT64_C(0x9e3779b97f4a7c15);
+    uint64_t b = UINT64_C(0xbb67ae8584caa73b);
+    uint64_t i = 0u;
+
+    for (i = 0u; i < iterations; i++) {
+        const uint8_t bit = pattern[(size_t)i & (LB_SELFTEST_BRANCH_PATTERN_BYTES - 1u)];
+
+        if (bit != 0u) {
+            PAL_BLOCK_IFCONV();
+            a = (a + b) ^ (i + UINT64_C(0x2545f4914f6cdd1d));
+        } else {
+            PAL_BLOCK_IFCONV();
+            b = (b + a) ^ (i + UINT64_C(0x6a09e667f3bcc909));
+        }
+    }
+
+    PAL_BARRIER();
+    g_lb_selftest_sink = a ^ b;
+    return g_lb_selftest_sink;
+}
+
+static double lb_selftest_branch_time(const uint8_t *pattern)
+{
+    uint64_t best = UINT64_MAX;
+    size_t round = 0u;
+
+    (void)lb_selftest_branch_walk(pattern, LB_SELFTEST_BRANCH_WARMUP);
+    for (round = 0u; round < LB_SELFTEST_BRANCH_ROUNDS; round++) {
+        const uint64_t begin = pal_now_ns();
+        uint64_t end = 0u;
+        uint64_t elapsed = 0u;
+
+        (void)lb_selftest_branch_walk(pattern, LB_SELFTEST_BRANCH_ITERATIONS);
+        end = pal_now_ns();
+        elapsed = (end > begin) ? (end - begin) : 0u;
+        if (elapsed > 0u && elapsed < best) {
+            best = elapsed;
+        }
+    }
+
+    return (best == UINT64_MAX) ? 0.0 : (double)best;
+}
+
+static bool lb_selftest_branch_check(const lb_cfg_t *cfg)
+{
+    double const_ns = 0.0;
+    double random_ns = 0.0;
+    double ratio = 0.0;
+    uint64_t state = UINT64_C(0x243f6a8885a308d3);
+    size_t i = 0u;
+
+    memset(g_lb_selftest_branch_pattern, 0, sizeof(g_lb_selftest_branch_pattern));
+    const_ns = lb_selftest_branch_time(g_lb_selftest_branch_pattern);
+
+    for (i = 0u; i < LB_SELFTEST_BRANCH_PATTERN_BYTES; i++) {
+        g_lb_selftest_branch_pattern[i] = (uint8_t)(util_rng_next(&state) & UINT64_C(1));
+    }
+    random_ns = lb_selftest_branch_time(g_lb_selftest_branch_pattern);
+
+    if (const_ns <= 0.0 || random_ns <= 0.0) {
+        tty_err("selftest: branch sanity could not be timed");
+        return false;
+    }
+
+    ratio = random_ns / const_ns;
+    tty_header(cfg, "  Branch pattern: const %.3f ms, 50/50 %.3f ms, ratio %.2fx", const_ns / 1.0e6,
+               random_ns / 1.0e6, ratio);
+
+    if (ratio < LB_SELFTEST_BRANCH_RATIO_MIN) {
+        tty_err("selftest: branch ratio %.2fx is below %.1fx (cmov/csel conversion?)", ratio,
+                LB_SELFTEST_BRANCH_RATIO_MIN);
+        return false;
+    }
+    return true;
+}
+
+static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t lb_selftest_ilp_k1(uint64_t iterations)
+{
+    uint64_t a0 = UINT64_C(1);
+    uint64_t i = 0u;
+
+    for (i = 0u; i < iterations; i++) {
+        a0 = (a0 * LB_SELFTEST_ILP_MUL) + LB_SELFTEST_ILP_ADD;
+        PAL_KEEP_INT(a0);
+    }
+
+    PAL_BARRIER();
+    g_lb_selftest_sink = a0;
+    return a0;
+}
+
+static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t lb_selftest_ilp_k4(uint64_t iterations)
+{
+    uint64_t a0 = UINT64_C(1);
+    uint64_t a1 = UINT64_C(3);
+    uint64_t a2 = UINT64_C(5);
+    uint64_t a3 = UINT64_C(7);
+    uint64_t i = 0u;
+
+    for (i = 0u; i < iterations; i++) {
+        a0 = (a0 * LB_SELFTEST_ILP_MUL) + LB_SELFTEST_ILP_ADD;
+        a1 = (a1 * LB_SELFTEST_ILP_MUL) + LB_SELFTEST_ILP_ADD;
+        a2 = (a2 * LB_SELFTEST_ILP_MUL) + LB_SELFTEST_ILP_ADD;
+        a3 = (a3 * LB_SELFTEST_ILP_MUL) + LB_SELFTEST_ILP_ADD;
+        PAL_KEEP_INT(a0);
+        PAL_KEEP_INT(a1);
+        PAL_KEEP_INT(a2);
+        PAL_KEEP_INT(a3);
+    }
+
+    PAL_BARRIER();
+    g_lb_selftest_sink = a0 + a1 + a2 + a3;
+    return g_lb_selftest_sink;
+}
+
+static double lb_selftest_ilp_rate(uint64_t (*fn)(uint64_t), size_t chains)
+{
+    uint64_t best = UINT64_MAX;
+    size_t round = 0u;
+
+    (void)fn(LB_SELFTEST_ILP_WARMUP);
+    for (round = 0u; round < LB_SELFTEST_ILP_ROUNDS; round++) {
+        const uint64_t begin = pal_now_ns();
+        uint64_t end = 0u;
+        uint64_t elapsed = 0u;
+
+        (void)fn(LB_SELFTEST_ILP_ITERATIONS);
+        end = pal_now_ns();
+        elapsed = (end > begin) ? (end - begin) : 0u;
+        if (elapsed > 0u && elapsed < best) {
+            best = elapsed;
+        }
+    }
+
+    if (best == UINT64_MAX) {
+        return 0.0;
+    }
+    return ((double)LB_SELFTEST_ILP_ITERATIONS * (double)chains * 1.0e9) / (double)best;
+}
+
+static bool lb_selftest_ilp_check(const lb_cfg_t *cfg)
+{
+    const double rate_one = lb_selftest_ilp_rate(lb_selftest_ilp_k1, 1u);
+    const double rate_four = lb_selftest_ilp_rate(lb_selftest_ilp_k4, LB_SELFTEST_ILP_CHAINS);
+    double gain = 0.0;
+
+    if (!(rate_one > 0.0) || !(rate_four > 0.0)) {
+        tty_err("selftest: core ilp sanity could not be timed");
+        return false;
+    }
+
+    gain = rate_four / rate_one;
+    tty_header(cfg, "  Core ILP: K=1 %.1f Mops/s, K=%u %.1f Mops/s, gain %.2fx", rate_one / 1.0e6,
+               LB_SELFTEST_ILP_CHAINS, rate_four / 1.0e6, gain);
+
+    if (gain < LB_SELFTEST_ILP_GAIN_MIN) {
+        tty_err("selftest: core ilp gain %.2fx is below %.1fx (chains serialized?)", gain,
+                LB_SELFTEST_ILP_GAIN_MIN);
+        return false;
+    }
+    return true;
+}
+
 static lb_status_t lb_selftest_run(const lb_cfg_t *cfg)
 {
     bool ok = true;
@@ -268,6 +478,12 @@ static lb_status_t lb_selftest_run(const lb_cfg_t *cfg)
         ok = false;
     }
     if (!lb_selftest_chase_check(cfg)) {
+        ok = false;
+    }
+    if (!lb_selftest_branch_check(cfg)) {
+        ok = false;
+    }
+    if (!lb_selftest_ilp_check(cfg)) {
         ok = false;
     }
 
@@ -300,6 +516,7 @@ static void print_help(const lb_cfg_t *cfg)
     tty_header(cfg, HELP_FLAG_FMT, "    --cool-ms <ms>", "cool-down between batches (default: 0)");
     tty_header(cfg, HELP_FLAG_FMT, "    --no-thp", "avoid transparent huge pages (default)");
     tty_header(cfg, HELP_FLAG_FMT, "    --thp", "allow transparent huge pages");
+    tty_header(cfg, HELP_FLAG_FMT, "    --long", "extend sys throttle to 10 seconds");
 
     tty_section(cfg, "Output");
     tty_header(cfg, HELP_FLAG_FMT, "    --csv", "emit CSV to stdout; diagnostics to stderr");
@@ -315,7 +532,7 @@ static void print_help(const lb_cfg_t *cfg)
 
     tty_section(cfg, "Diagnostics");
     tty_header(cfg, HELP_FLAG_FMT, "    selftest",
-               "verify Sattolo integrity and -O2 pointer-chase viability");
+               "verify Sattolo, pointer-chase, branch, and core-ILP invariants at -O2");
 
     tty_section(cfg, "Modules");
     for (i = 0u; i < module_count; i++) {
@@ -421,6 +638,10 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
             cfg->write = true;
             continue;
         }
+        if (strcmp(arg, "--long") == 0) {
+            cfg->throttle_long = true;
+            continue;
+        }
 
         if (strcmp(arg, "--cpu") == 0 || strcmp(arg, "--qos") == 0 ||
             strcmp(arg, "--max-mem") == 0 || strcmp(arg, "--batch-ms") == 0 ||
@@ -497,6 +718,7 @@ int main(int argc, char **argv)
     cfg.csv = false;
     cfg.no_color = false;
     cfg.write = false;
+    cfg.throttle_long = false;
 
     status = parse_args(argc, argv, &cfg, &show_help, &show_version, &module_name, &subtest_name);
     if (status != LB_STATUS_OK) {

@@ -19,6 +19,11 @@
 #define SYS_TIMER_WARMUP_CALLS 1000u
 #define SYS_TIMER_OVERHEAD_CALLS 100000u
 
+/* sys throttle: report the sustained-load decay in fixed 500 ms intervals. */
+#define SYS_THROTTLE_INTERVAL_MS 500u
+#define SYS_THROTTLE_SHORT_INTERVALS 10u
+#define SYS_THROTTLE_LONG_INTERVALS 20u
+
 static uint64_t sys_bytes_to_mib(uint64_t bytes)
 {
     return bytes / (UINT64_C(1024) * UINT64_C(1024));
@@ -277,6 +282,63 @@ lb_status_t sys_timer_run(const lb_cfg_t *cfg)
                 (uint32_t)SYS_TIMER_OVERHEAD_CALLS);
     tty_csv_row(cfg, "sys,timer,batch_total,%" PRIu64 ",ns", total_ns);
     tty_csv_row(cfg, "sys,timer,clock_step_le_overhead,%s,bool", clock_limited ? "true" : "false");
+
+    return LB_STATUS_OK;
+}
+
+lb_status_t sys_throttle_run(const lb_cfg_t *cfg)
+{
+    uint32_t intervals = SYS_THROTTLE_SHORT_INTERVALS;
+    double first_ops_per_us = 0.0;
+    double min_pct = 100.0;
+    double final_pct = 100.0;
+    uint32_t index = 0u;
+
+    if (cfg == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    sys_apply_runtime(cfg);
+
+    if (cfg->throttle_long) {
+        intervals = SYS_THROTTLE_LONG_INTERVALS;
+    }
+
+    tty_csv_row(cfg, "sys,throttle,interval,elapsed_s,ops_per_us,percent_of_first");
+    tty_section(cfg, "Sustained-load throttle");
+    tty_kv(cfg, "Load", "dependent ALU canary, no idle gaps");
+    tty_kv(cfg, "Duration", "%" PRIu32 " ms (%" PRIu32 " intervals)",
+           intervals * SYS_THROTTLE_INTERVAL_MS, intervals);
+    tty_kv(cfg, "Interval", "%u ms", SYS_THROTTLE_INTERVAL_MS);
+    tty_header(cfg, "  %8s %12s %12s", "Elapsed", "ops/us", "% first");
+
+    for (index = 0u; index < intervals; index++) {
+        const uint64_t ops = stats_canary_measure(SYS_THROTTLE_INTERVAL_MS);
+        const double ops_per_us = (double)ops / ((double)SYS_THROTTLE_INTERVAL_MS * 1000.0);
+        const double elapsed_s = (double)(index + 1u) * ((double)SYS_THROTTLE_INTERVAL_MS / 1000.0);
+        double pct = 100.0;
+
+        if (index == 0u) {
+            first_ops_per_us = ops_per_us;
+        }
+        if (first_ops_per_us > 0.0) {
+            pct = (ops_per_us / first_ops_per_us) * 100.0;
+        }
+        if (pct < min_pct) {
+            min_pct = pct;
+        }
+        final_pct = pct;
+
+        tty_header(cfg, "  %7.1f s %12.2f %11.1f%%", elapsed_s, ops_per_us, pct);
+        tty_csv_row(cfg, "sys,throttle,%" PRIu32 ",%.1f,%.2f,%.1f", index + 1u, elapsed_s,
+                    ops_per_us, pct);
+    }
+
+    tty_header(cfg, "  Minimum: %.1f%% (drop %.1f%%), final: %.1f%%", min_pct, 100.0 - min_pct,
+               final_pct);
+    tty_csv_row(cfg, "sys,throttle,minimum,%.1f,percent", min_pct);
+    tty_csv_row(cfg, "sys,throttle,drop,%.1f,percent", 100.0 - min_pct);
+    tty_csv_row(cfg, "sys,throttle,final,%.1f,percent", final_pct);
 
     return LB_STATUS_OK;
 }
