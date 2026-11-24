@@ -6,6 +6,23 @@
 
 #include "types.h"
 
+/*
+ * Repeat one statement eight times. The statement must be a plain expression
+ * without control flow; benchmark hot loops use it to amortise loop overhead
+ * while keeping the timing structure visible in the source.
+ */
+#define LB_UNROLL_8(stmt)                                                                          \
+    do {                                                                                           \
+        stmt;                                                                                      \
+        stmt;                                                                                      \
+        stmt;                                                                                      \
+        stmt;                                                                                      \
+        stmt;                                                                                      \
+        stmt;                                                                                      \
+        stmt;                                                                                      \
+        stmt;                                                                                      \
+    } while (0)
+
 /* Entry point signature shared by every benchmark subcommand. */
 /* NOLINTNEXTLINE(readability-identifier-naming): the public name follows the PAL API style. */
 typedef lb_status_t (*lb_subtest_fn)(const lb_cfg_t *cfg);
@@ -34,5 +51,15 @@ const lb_module_t *lb_bench_modules(size_t *count);
 /* System calibration and clock subtests, implemented in src/bench/bench_sys.c. */
 lb_status_t sys_info_run(const lb_cfg_t *cfg);
 lb_status_t sys_timer_run(const lb_cfg_t *cfg);
+
+/* Cache subtests, implemented in src/bench/bench_mem.c. */
+lb_status_t mem_size_run(const lb_cfg_t *cfg);
+lb_status_t mem_line_run(const lb_cfg_t *cfg);
+lb_status_t mem_assoc_run(const lb_cfg_t *cfg);
+lb_status_t mem_prefetch_run(const lb_cfg_t *cfg);
+
+/* TLB and page-fault subtests, implemented in src/bench/bench_tlb.c. */
+lb_status_t tlb_size_run(const lb_cfg_t *cfg);
+lb_status_t tlb_fault_run(const lb_cfg_t *cfg);
 
 #endif /* LB_BENCH_H */

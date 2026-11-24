@@ -24,6 +24,9 @@ typedef struct pal_mem pal_mem_t;
 /* Monotonic nanosecond clock. */
 uint64_t pal_now_ns(void);
 
+/* Sleep for at least milliseconds; a zero duration is a no-op. */
+void pal_sleep_ms(uint32_t milliseconds);
+
 /*
  * True when stdout (use_stderr == false) or stderr (use_stderr == true) is
  * attached to a terminal. Used to decide whether ANSI styling is safe.

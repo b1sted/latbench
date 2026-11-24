@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include "pal/compiler.h"
+#include "stats.h"
 #include "types.h"
 
 /*
@@ -35,6 +36,26 @@ void tty_progress(const lb_cfg_t *cfg, const char *fmt, ...) PAL_PRINTF_FORMAT(2
 /* Warnings and errors always go to stderr with a stable prefix. */
 void tty_warn(const char *fmt, ...) PAL_PRINTF_FORMAT(1, 2);
 void tty_err(const char *fmt, ...) PAL_PRINTF_FORMAT(1, 2);
+
+/*
+ * Warn when a DVFS canary drift exceeds ten percent in either direction.
+ * Drift within the tolerance, or a non-finite value, produces no output.
+ */
+void tty_warn_drift(double drift_pct);
+
+/*
+ * Render one working-set latency series as a compact table plus a logarithmic
+ * ASCII bar. Sizes are byte counts and are scaled to KiB/MiB/GiB. The optional
+ * level_names array labels detected thresholds (for example "L1", "L2"); short
+ * or missing labels fall back to "step N".
+ *
+ * Heading, table, and threshold summary go to stdout, except in CSV mode where
+ * stdout receives only the data header and one clean record per point. All
+ * informational text then moves to stderr.
+ */
+lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
+                            const stats_steps_t *steps, const char *const *level_names,
+                            size_t level_name_count);
 
 /* Render a byte count as a binary unit, for example "27.08 GiB". */
 const char *tty_format_bytes(uint64_t bytes, char *out, size_t capacity);
