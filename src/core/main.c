@@ -58,6 +58,12 @@ static const lb_subtest_t CORE_SUBTESTS[] = {
     {"stlf", "store-to-load forwarding latency and 4K aliasing", core_stlf_run},
 };
 
+static const lb_subtest_t BRANCH_SUBTESTS[] = {
+    {"hist", "predictor history and mispredict penalty from branch patterns", br_hist_run},
+    {"rsb", "return-stack buffer capacity from recursive call chains", br_rsb_run},
+    {"btb", "BTB and L1i capacity from indirect-call trampolines", br_btb_run},
+};
+
 static const lb_module_t BENCH_MODULES[] = {
     {"sys", "system calibration and clock diagnostics", SYS_SUBTESTS, LB_ARRAY_SIZE(SYS_SUBTESTS)},
     {"mem", "cache size, line, associativity, and prefetcher probes", MEM_SUBTESTS,
@@ -65,6 +71,8 @@ static const lb_module_t BENCH_MODULES[] = {
     {"tlb", "TLB capacity and page-fault latency", TLB_SUBTESTS, LB_ARRAY_SIZE(TLB_SUBTESTS)},
     {"core", "pipeline ILP, MLP, alignment, and store-forwarding probes", CORE_SUBTESTS,
      LB_ARRAY_SIZE(CORE_SUBTESTS)},
+    {"branch", "branch predictor, RSB, and BTB capacity probes", BRANCH_SUBTESTS,
+     LB_ARRAY_SIZE(BRANCH_SUBTESTS)},
 };
 
 const lb_module_t *lb_bench_modules(size_t *count)

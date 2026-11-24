@@ -68,4 +68,9 @@ lb_status_t core_mlp_run(const lb_cfg_t *cfg);
 lb_status_t core_align_run(const lb_cfg_t *cfg);
 lb_status_t core_stlf_run(const lb_cfg_t *cfg);
 
+/* Branch predictor, RSB, and BTB subtests, implemented in bench_branch.c. */
+lb_status_t br_hist_run(const lb_cfg_t *cfg);
+lb_status_t br_rsb_run(const lb_cfg_t *cfg);
+lb_status_t br_btb_run(const lb_cfg_t *cfg);
+
 #endif /* LB_BENCH_H */
