@@ -83,4 +83,13 @@ lb_status_t topo_atomic_run(const lb_cfg_t *cfg);
 lb_status_t topo_falseshare_run(const lb_cfg_t *cfg);
 lb_status_t topo_pingpong_run(const lb_cfg_t *cfg);
 
+/* Operating-system probes, implemented in bench_os.c. */
+lb_status_t os_syscall_run(const lb_cfg_t *cfg);
+lb_status_t os_ctx_run(const lb_cfg_t *cfg);
+lb_status_t os_wakeup_run(const lb_cfg_t *cfg);
+lb_status_t os_shootdown_run(const lb_cfg_t *cfg);
+lb_status_t os_fork_run(const lb_cfg_t *cfg);
+lb_status_t os_sig_run(const lb_cfg_t *cfg);
+lb_status_t os_sleep_run(const lb_cfg_t *cfg);
+
 #endif /* LB_BENCH_H */
