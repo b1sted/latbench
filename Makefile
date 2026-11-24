@@ -44,11 +44,15 @@ else
 	CPPCHECK_DEFINES :=
 endif
 
+# Portable core sources are listed explicitly so link order stays deterministic.
+# Add new src/core/*.c files here as their modules are implemented.
+CORE_SRCS := src/core/main.c src/core/stats.c src/core/tty.c src/core/util.c
+
 # Benchmark suites are listed explicitly so link order stays deterministic.
 # Add new src/bench/*.c files here as their modules are implemented.
 BENCH_SRCS := src/bench/bench_sys.c
 
-SRCS := $(wildcard src/core/*.c) $(BENCH_SRCS)
+SRCS := $(CORE_SRCS) $(BENCH_SRCS)
 SRCS += $(PLATFORM_SRCS)
 
 BUILD_DIR := build
@@ -71,7 +75,8 @@ LEAKS_BIN := $(BIN_DIR)/latbench-asan
 PLATFORM_RELEASE_OBJS := $(PLATFORM_SRCS:%.c=$(RELEASE_OBJDIR)/%.o)
 PLATFORM_LEAKS_OBJS := $(PLATFORM_SRCS:%.c=$(LEAKS_OBJDIR)/%.o)
 
-TEST_SRCS := $(wildcard tests/core/test_*.c tests/platform/test_*.c)
+TEST_SRCS := tests/core/test_stats.c tests/core/test_util.c \
+	$(wildcard tests/platform/test_*.c)
 TEST_RELEASE_OBJS := $(patsubst tests/%.c,$(TEST_OBJDIR)/rel/tests/%.o,$(TEST_SRCS))
 TEST_LEAKS_OBJS := $(patsubst tests/%.c,$(LEAKS_OBJDIR)/tests/%.o,$(TEST_SRCS))
 TEST_BINS := $(patsubst tests/%.c,$(TEST_BINDIR)/rel/%,$(TEST_SRCS))
