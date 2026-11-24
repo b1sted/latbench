@@ -145,6 +145,33 @@ static void test_detect_three_levels(void)
     }
 }
 
+static void test_detect_tlb_edge(void)
+{
+    enum { POINT_COUNT = 7 };
+    const size_t x[POINT_COUNT] = {131072u,  262144u,  524288u, 1048576u,
+                                   2097152u, 4194304u, 8388608u};
+    const double latency[POINT_COUNT] = {0.82, 0.82, 2.23, 2.37, 4.50, 4.48, 6.88};
+    stats_steps_t steps = {0};
+
+    check_true(stats_detect_steps(x, latency, POINT_COUNT, &steps) == LB_STATUS_OK,
+               "tlb edge detection succeeds");
+    check_true(steps.count == 3u, "tlb edge curve reports all three jumps");
+    if (steps.count >= 1u) {
+        check_true(steps.items[0].x_lower == 262144u && steps.items[0].x_upper == 524288u,
+                   "tlb edge keeps the first 256-512 KiB boundary");
+        check_true(steps.items[0].x == 393216u, "tlb edge estimates the first step near 384 KiB");
+        check_true(steps.items[0].ratio > 2.5, "tlb edge keeps the first sharp 2.7x jump");
+    }
+    if (steps.count >= 2u) {
+        check_true(steps.items[1].x_lower == 1048576u && steps.items[1].x_upper == 2097152u,
+                   "tlb edge places the second step at the 1-2 MiB boundary");
+    }
+    if (steps.count >= 3u) {
+        check_true(steps.items[2].x_lower == 4194304u && steps.items[2].x_upper == 8388608u,
+                   "tlb edge keeps the final 4-8 MiB boundary");
+    }
+}
+
 static void test_detect_flat_with_ram(void)
 {
     enum { POINT_COUNT = 16 };
@@ -346,6 +373,7 @@ int main(void)
     test_percentile();
     test_smooth_median3();
     test_detect_three_levels();
+    test_detect_tlb_edge();
     test_detect_flat_with_ram();
     test_detect_noisy_gradual();
     test_detect_flat_plateau();

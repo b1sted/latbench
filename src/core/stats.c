@@ -30,9 +30,6 @@
 /* Maximum max/min spread allowed on the upper plateau. */
 #define STATS_STEP_PLATEAU_SPREAD_MAX 1.50
 
-/* Candidate steps at most this many points apart belong to the same jump. */
-#define STATS_STEP_MERGE_GAP STATS_STEP_WINDOW
-
 /* Dependent ALU chain iterations between clock reads in the canary. */
 #define STATS_CANARY_CHUNK 4096u
 
@@ -423,14 +420,106 @@ lb_status_t stats_smooth_median3(const double *samples, size_t count, double *ou
     return LB_STATUS_OK;
 }
 
+static bool stats_jump_significant(double lower, double upper, double min_jump)
+{
+    if (!(lower > 0.0)) {
+        return false;
+    }
+    if ((upper / lower) < STATS_STEP_RATIO_MIN) {
+        return false;
+    }
+    return (upper - lower) >= min_jump;
+}
+
+/*
+ * Median of up to STATS_STEP_WINDOW smoothed points in [begin, end). Callers
+ * always pass a non-empty range.
+ */
+static double stats_window_median(const double *values, size_t begin, size_t end)
+{
+    size_t count = end - begin;
+
+    if (count > STATS_STEP_WINDOW) {
+        count = STATS_STEP_WINDOW;
+    }
+    return stats_median_small(values + begin, count);
+}
+
+/*
+ * Measure the plateau immediately below and above a boundary. lower_begin and
+ * upper_end delimit the region owned by this step, so a neighbouring step can
+ * never leak into either plateau. Each side uses at most STATS_STEP_WINDOW
+ * points.
+ */
+static void stats_measure_plateaus(const double *values, size_t boundary, size_t lower_begin,
+                                   size_t upper_end, double *lower_out, double *upper_out)
+{
+    size_t lower_start = lower_begin;
+    size_t upper_stop = upper_end;
+
+    if (boundary > lower_begin + STATS_STEP_WINDOW) {
+        lower_start = boundary - STATS_STEP_WINDOW;
+    }
+    if ((boundary + STATS_STEP_WINDOW) < upper_end) {
+        upper_stop = boundary + STATS_STEP_WINDOW;
+    }
+
+    *lower_out = stats_window_median(values, lower_start, boundary);
+    *upper_out = stats_window_median(values, boundary, upper_stop);
+}
+
+/*
+ * Gradual fallback: look for the strongest smoothed step inside a region that
+ * contains no sharp adjacent jump. This keeps a slow monotonic ramp detectable
+ * without letting the same ramp produce a cascade of spurious steps.
+ */
+static bool stats_find_gradual(const double *values, size_t begin, size_t end, double min_jump,
+                               size_t *boundary_out)
+{
+    double best_ratio = 0.0;
+    size_t best = 0u;
+    size_t i = 0u;
+    bool found = false;
+
+    if ((end - begin) < ((size_t)STATS_STEP_WINDOW * 2u)) {
+        return false;
+    }
+
+    for (i = begin + STATS_STEP_WINDOW; (i + STATS_STEP_WINDOW) <= end; i++) {
+        const double lower = stats_window_median(values, i - STATS_STEP_WINDOW, i);
+        const double upper = stats_window_median(values, i, i + STATS_STEP_WINDOW);
+        double ratio = 0.0;
+
+        if (!stats_jump_significant(lower, upper, min_jump)) {
+            continue;
+        }
+        if (!stats_plateau_stable(values + i, STATS_STEP_WINDOW)) {
+            continue;
+        }
+        ratio = upper / lower;
+        if (!found || ratio > best_ratio) {
+            best_ratio = ratio;
+            best = i;
+            found = true;
+        }
+    }
+
+    if (found) {
+        *boundary_out = best;
+    }
+    return found;
+}
+
 lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t count,
                                stats_steps_t *steps)
 {
     double *smoothed = NULL;
+    size_t *sharp = NULL;
+    size_t sharp_count = 0u;
     double min_jump = 0.0;
     size_t i = 0u;
-    size_t last_index = 0u;
-    bool have_last = false;
+    size_t segment_begin = 0u;
+    size_t segment_index = 0u;
     lb_status_t status = LB_STATUS_NOMEM;
 
     if (steps == NULL) {
@@ -452,13 +541,14 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
     if (count < 4u) {
         return LB_STATUS_OK;
     }
-    if (count > SIZE_MAX / sizeof(*smoothed)) {
+    if (count > SIZE_MAX / sizeof(*smoothed) || count > SIZE_MAX / sizeof(*sharp)) {
         return LB_STATUS_NOMEM;
     }
 
     smoothed = malloc(count * sizeof(*smoothed));
-    if (smoothed == NULL) {
-        return LB_STATUS_NOMEM;
+    sharp = malloc(count * sizeof(*sharp));
+    if (smoothed == NULL || sharp == NULL) {
+        goto cleanup;
     }
     status = stats_smooth_median3(latency_ns, count, smoothed);
     if (status != LB_STATUS_OK) {
@@ -470,49 +560,70 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
         min_jump = STATS_STEP_MIN_JUMP_NS;
     }
 
+    /*
+     * Sharp steps are found directly between adjacent smoothed points. This
+     * preserves the exact plateau edge (the old window-only scan smeared the
+     * first jump into the next one). Two adjacent candidates are the same
+     * physical edge, so keep the stronger one.
+     */
     for (i = 1u; i < count; i++) {
-        const size_t left = (i < STATS_STEP_WINDOW) ? i : STATS_STEP_WINDOW;
-        const size_t right = ((count - i) < STATS_STEP_WINDOW) ? (count - i) : STATS_STEP_WINDOW;
-        const double lower = stats_median_small(smoothed + i - left, left);
-        const double upper = stats_median_small(smoothed + i, right);
-        double ratio = 0.0;
-
-        if (!(lower > 0.0)) {
+        if (!stats_jump_significant(smoothed[i - 1u], smoothed[i], min_jump)) {
             continue;
         }
-        ratio = upper / lower;
-        if (ratio < STATS_STEP_RATIO_MIN) {
-            continue;
-        }
-        if ((upper - lower) < min_jump) {
-            continue;
-        }
-        if (!stats_plateau_stable(smoothed + i, right)) {
-            continue;
-        }
-
-        if (have_last && (i - last_index) <= STATS_STEP_MERGE_GAP) {
-            stats_step_t *last = &steps->items[steps->count - 1u];
-
-            if (ratio > last->ratio) {
-                stats_store_step(last, x, i, lower, upper);
+        if (sharp_count > 0u && i == (sharp[sharp_count - 1u] + 1u)) {
+            if ((smoothed[i] / smoothed[i - 1u]) >
+                (smoothed[sharp[sharp_count - 1u]] / smoothed[sharp[sharp_count - 1u] - 1u])) {
+                sharp[sharp_count - 1u] = i;
             }
-            last_index = i;
             continue;
         }
+        sharp[sharp_count] = i;
+        sharp_count++;
+    }
 
+    for (segment_index = 0u; segment_index <= sharp_count; segment_index++) {
+        size_t segment_end = (segment_index < sharp_count) ? sharp[segment_index] : count;
+        size_t gradual = 0u;
+
+        if (segment_end > segment_begin &&
+            stats_find_gradual(smoothed, segment_begin, segment_end, min_jump, &gradual)) {
+            double lower = 0.0;
+            double upper = 0.0;
+
+            if (steps->count >= STATS_MAX_STEPS) {
+                break;
+            }
+            stats_measure_plateaus(smoothed, gradual, segment_begin, segment_end, &lower, &upper);
+            stats_store_step(&steps->items[steps->count], x, gradual, lower, upper);
+            steps->count++;
+        }
+
+        if (segment_index == sharp_count) {
+            break;
+        }
         if (steps->count >= STATS_MAX_STEPS) {
             break;
         }
-        stats_store_step(&steps->items[steps->count], x, i, lower, upper);
-        steps->count++;
-        last_index = i;
-        have_last = true;
+
+        {
+            const size_t boundary = sharp[segment_index];
+            const size_t lower_begin = (segment_index == 0u) ? 0u : sharp[segment_index - 1u];
+            const size_t upper_end =
+                ((segment_index + 1u) < sharp_count) ? sharp[segment_index + 1u] : count;
+            double lower = 0.0;
+            double upper = 0.0;
+
+            stats_measure_plateaus(smoothed, boundary, lower_begin, upper_end, &lower, &upper);
+            stats_store_step(&steps->items[steps->count], x, boundary, lower, upper);
+            steps->count++;
+        }
+        segment_begin = sharp[segment_index];
     }
 
     status = LB_STATUS_OK;
 
 cleanup:
+    free(sharp);
     free(smoothed);
     return status;
 }
