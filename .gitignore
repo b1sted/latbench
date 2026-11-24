@@ -1,0 +1,11 @@
+# All build artifacts live under build/.
+/build/
+
+# Legacy in-tree binaries that must never be committed again.
+/latbench
+/latbench-dev
+/latbench-asan
+
+# Stray object and dependency files next to the sources.
+*.o
+*.d

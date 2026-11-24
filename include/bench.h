@@ -1,0 +1,38 @@
+/* SPDX-License-Identifier: GPL-3.0 */
+#ifndef LB_BENCH_H
+#define LB_BENCH_H
+
+#include <stddef.h>
+
+#include "types.h"
+
+/* Entry point signature shared by every benchmark subcommand. */
+/* NOLINTNEXTLINE(readability-identifier-naming): the public name follows the PAL API style. */
+typedef lb_status_t (*lb_subtest_fn)(const lb_cfg_t *cfg);
+
+/* One runnable subtest inside a benchmark module (for example "sys timer"). */
+typedef struct lb_subtest_t {
+    const char *name;
+    const char *help;
+    lb_subtest_fn run;
+} lb_subtest_t;
+
+/* A benchmark module groups related subtests (for example "sys"). */
+typedef struct lb_module_t {
+    const char *name;
+    const char *help;
+    const lb_subtest_t *subtests;
+    size_t subtest_count;
+} lb_module_t;
+
+/*
+ * Return the module registry. The returned array is static and must not be
+ * modified. When count is non-NULL it receives the number of modules.
+ */
+const lb_module_t *lb_bench_modules(size_t *count);
+
+/* System calibration and clock subtests, implemented in src/bench/bench_sys.c. */
+lb_status_t sys_info_run(const lb_cfg_t *cfg);
+lb_status_t sys_timer_run(const lb_cfg_t *cfg);
+
+#endif /* LB_BENCH_H */
