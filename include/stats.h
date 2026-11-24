@@ -134,6 +134,13 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
 uint64_t stats_canary_measure(uint32_t duration_ms);
 
 /*
+ * Warm the canary for about 50 ms and then take the baseline reading. The
+ * warm-up lets the core settle into its working Turbo P-state so a cold first
+ * sample does not look like a frequency drop.
+ */
+uint64_t stats_canary_baseline(uint32_t duration_ms);
+
+/*
  * Relative throughput drift between two canary measurements, in percent.
  * A positive result means the second run completed more work. Returns zero
  * when baseline_ops is zero.

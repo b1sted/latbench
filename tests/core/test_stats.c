@@ -196,6 +196,33 @@ static void test_detect_flat_with_ram(void)
     }
 }
 
+static void test_detect_smooth_slope(void)
+{
+    enum { POINT_COUNT = 16 };
+    const double ramp[POINT_COUNT] = {10.0, 10.0, 10.0, 10.0, 10.0,  10.0,  10.0,  10.0,
+                                      20.0, 30.0, 45.0, 68.0, 100.0, 100.0, 100.0, 100.0};
+    size_t x[POINT_COUNT] = {0u};
+    double latency[POINT_COUNT] = {0.0};
+    stats_steps_t steps = {0};
+    size_t i = 0u;
+
+    for (i = 0u; i < POINT_COUNT; i++) {
+        x[i] = (i + 1u) * 4096u;
+        latency[i] = ramp[i];
+    }
+
+    check_true(stats_detect_steps(x, latency, POINT_COUNT, &steps) == LB_STATUS_OK,
+               "smooth slope detection succeeds");
+    check_true(steps.count == 1u, "smooth slope collapses into one step");
+    if (steps.count == 1u) {
+        check_true(steps.items[0].x_lower == x[7] && steps.items[0].x_upper == x[11],
+                   "smooth slope spans the whole ramp");
+        check_true(approx(steps.items[0].lower_ns, 10.0) && approx(steps.items[0].upper_ns, 100.0),
+                   "smooth slope keeps the outer plateaus");
+        check_true(approx(steps.items[0].ratio, 10.0), "smooth slope ratio covers the ramp");
+    }
+}
+
 static void test_detect_noisy_gradual(void)
 {
     enum { POINT_COUNT = 24 };
@@ -366,6 +393,8 @@ static void test_canary(void)
                "canary drift is zero without a baseline");
     check_true(stats_canary_measure(0u) == 0u, "zero-duration canary returns zero");
     check_true(stats_canary_measure(1u) > 0u, "one-millisecond canary completes work");
+    check_true(stats_canary_baseline(0u) == 0u, "zero-duration warmed baseline returns zero");
+    check_true(stats_canary_baseline(1u) > 0u, "warmed baseline completes work");
 }
 
 int main(void)
@@ -375,6 +404,7 @@ int main(void)
     test_detect_three_levels();
     test_detect_tlb_edge();
     test_detect_flat_with_ram();
+    test_detect_smooth_slope();
     test_detect_noisy_gradual();
     test_detect_flat_plateau();
     test_detect_validation();
