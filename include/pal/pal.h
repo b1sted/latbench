@@ -17,6 +17,13 @@
 /* NOLINTNEXTLINE(readability-identifier-naming): the public tag stays pal_mem. */
 typedef struct pal_mem pal_mem_t;
 
+/* Opaque joinable thread handle. */
+/* NOLINTNEXTLINE(readability-identifier-naming): the public tag stays pal_thread. */
+typedef struct pal_thread pal_thread_t;
+
+/* Thread entry point. The argument is the value passed to pal_thread_spawn. */
+typedef void (*pal_thread_fn_t)(void *arg);
+
 /* Arena allocation flags. PAL_MEM_NO_THP wins when both bits are set. */
 #define PAL_MEM_NO_THP 0x01u
 #define PAL_MEM_THP 0x02u
@@ -60,6 +67,32 @@ lb_status_t pal_pin_cpu(int32_t cpu_id);
 
 /* Request interactive or background QoS. Unsupported platforms return UNSUPPORTED. */
 lb_status_t pal_set_qos(bool high_perf);
+
+/*
+ * True when the platform exposes a per-thread CPU affinity request. Linux and
+ * Android report true even though a container or cpuset may still deny the
+ * actual pin; macOS has no stable hard-affinity API and reports false.
+ */
+bool pal_pin_supported(void);
+
+/*
+ * Start a joinable thread. pin_cpu >= 0 asks the new thread to pin itself to
+ * that logical CPU before fn runs; pass -1 to leave affinity untouched. When
+ * qos_perf is true the new thread requests interactive/high-performance QoS
+ * before fn runs. Both requests are best-effort on platforms that lack them.
+ *
+ * Returns NULL when fn is NULL, allocation fails, or the OS refuses to create
+ * the thread. Every non-NULL handle must be passed to pal_thread_join exactly
+ * once.
+ */
+pal_thread_t *pal_thread_spawn(pal_thread_fn_t fn, void *arg, int32_t pin_cpu, bool qos_perf);
+
+/*
+ * Wait for a spawned thread to finish and release its handle. Passing NULL is
+ * an error. On success the handle is invalid and must not be used again; on
+ * failure the caller still owns the handle.
+ */
+lb_status_t pal_thread_join(pal_thread_t *t);
 
 /* Allocate a page-aligned arena of at least size bytes. */
 pal_mem_t *pal_mem_alloc(size_t size, uint32_t flags);

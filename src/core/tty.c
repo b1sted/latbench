@@ -30,11 +30,24 @@
 #define TTY_PLOT_BAR_WIDTH 20u
 #define TTY_PLOT_FIELD_WIDTH 10
 #define TTY_PLOT_FLAT_RATIO 1.5
-#define TTY_DRIFT_WARN_PCT 10.0
+#define TTY_DRIFT_WARN_DROP_PCT 10.0
+#define TTY_DRIFT_WARN_SPIKE_PCT 25.0
+
+/* Latency heatmap: seven-character cells keep common topologies readable. */
+#define TTY_MATRIX_MAX_SIZE 256u
+#define TTY_MATRIX_CELL_WIDTH 7
+#define TTY_MATRIX_ROW_WIDTH 3
+#define TTY_MATRIX_SEPARATOR "-------"
+#define TTY_MATRIX_FAST_NS UINT64_C(30)
+#define TTY_MATRIX_SLOW_NS UINT64_C(80)
+#define TTY_ANSI_MATRIX_FAST "\x1b[32m"
+#define TTY_ANSI_MATRIX_MID "\x1b[33m"
+#define TTY_ANSI_MATRIX_SLOW "\x1b[31m"
 
 static bool g_tty_section_started = false;
 static bool g_tty_no_color = false;
 static bool g_tty_csv_series_header = false;
+static bool g_tty_csv_matrix_header = false;
 
 static FILE *tty_info_stream(const lb_cfg_t *cfg)
 {
@@ -213,13 +226,13 @@ void tty_err(const char *fmt, ...)
 
 void tty_warn_drift(double drift_pct)
 {
-    double magnitude = drift_pct;
-
-    if (magnitude < 0.0) {
-        magnitude = -magnitude;
-    }
-    if (magnitude > TTY_DRIFT_WARN_PCT) {
-        tty_warn("frequency drift %+.1f%% exceeds %.0f%%", drift_pct, TTY_DRIFT_WARN_PCT);
+    /*
+     * A moderate positive drift is normal Turbo headroom, not a defect. Only a
+     * real slowdown (throttling) or an extreme upward spike is worth a warning.
+     */
+    if (drift_pct < -TTY_DRIFT_WARN_DROP_PCT || drift_pct > TTY_DRIFT_WARN_SPIKE_PCT) {
+        tty_warn("frequency drift %+.1f%% (drop limit -%.0f%%, spike limit +%.0f%%)", drift_pct,
+                 TTY_DRIFT_WARN_DROP_PCT, TTY_DRIFT_WARN_SPIKE_PCT);
     }
 }
 
@@ -611,4 +624,94 @@ lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
 cleanup:
     free(summaries);
     return status;
+}
+
+static const char *tty_matrix_cell_color(uint64_t ns)
+{
+    if (ns <= TTY_MATRIX_FAST_NS) {
+        return TTY_ANSI_MATRIX_FAST;
+    }
+    if (ns <= TTY_MATRIX_SLOW_NS) {
+        return TTY_ANSI_MATRIX_MID;
+    }
+    return TTY_ANSI_MATRIX_SLOW;
+}
+
+lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint64_t *latency_ns,
+                             size_t count)
+{
+    FILE *stream = NULL;
+    bool color = false;
+    size_t i = 0u;
+    size_t j = 0u;
+
+    if (latency_ns == NULL || count == 0u || count > (size_t)TTY_MATRIX_MAX_SIZE) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    tty_section(cfg, (title != NULL) ? title : "CPU latency matrix");
+
+    if (cfg != NULL && cfg->csv) {
+        if (!g_tty_csv_matrix_header) {
+            tty_csv_row(cfg, "cpu_a,cpu_b,latency_ns");
+            g_tty_csv_matrix_header = true;
+        }
+        for (i = 0u; i < count; i++) {
+            for (j = 0u; j < count; j++) {
+                if (i != j) {
+                    tty_csv_row(cfg, "%zu,%zu,%" PRIu64, i, j, latency_ns[i * count + j]);
+                }
+            }
+        }
+        return LB_STATUS_OK;
+    }
+
+    stream = tty_info_stream(cfg);
+    color = tty_color_enabled(cfg, stream);
+
+    (void)fprintf(stream, "    |");
+    for (j = 0u; j < count; j++) {
+        (void)fprintf(stream, "%*zu", TTY_MATRIX_CELL_WIDTH, j);
+    }
+    (void)fputc('\n', stream);
+
+    (void)fputs("----+", stream);
+    for (j = 0u; j < count; j++) {
+        (void)fputs(TTY_MATRIX_SEPARATOR, stream);
+    }
+    (void)fputc('\n', stream);
+
+    for (i = 0u; i < count; i++) {
+        (void)fprintf(stream, "%*zu |", TTY_MATRIX_ROW_WIDTH, i);
+        for (j = 0u; j < count; j++) {
+            char cell[32] = {0};
+            const char *cell_color = NULL;
+
+            if (i == j) {
+                (void)snprintf(cell, sizeof(cell), "-");
+            } else {
+                (void)snprintf(cell, sizeof(cell), "%" PRIu64, latency_ns[i * count + j]);
+                if (color) {
+                    cell_color = tty_matrix_cell_color(latency_ns[i * count + j]);
+                }
+            }
+
+            if (cell_color != NULL) {
+                (void)fputs(cell_color, stream);
+            }
+            (void)fprintf(stream, "%*s", TTY_MATRIX_CELL_WIDTH, cell);
+            if (cell_color != NULL) {
+                (void)fputs(TTY_ANSI_RESET, stream);
+            }
+        }
+        (void)fputc('\n', stream);
+    }
+
+    if (color) {
+        (void)fprintf(stream,
+                      "  legend: <= %" PRIu64 " ns fast, <= %" PRIu64 " ns mid, > %" PRIu64
+                      " ns slow\n",
+                      TTY_MATRIX_FAST_NS, TTY_MATRIX_SLOW_NS, TTY_MATRIX_SLOW_NS);
+    }
+    return LB_STATUS_OK;
 }

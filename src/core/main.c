@@ -89,6 +89,12 @@ static const lb_subtest_t DRAM_SUBTESTS[] = {
     {"row", "DRAM row-buffer locality versus random page switches", dram_row_run},
 };
 
+static const lb_subtest_t TOPO_SUBTESTS[] = {
+    {"atomic", "uncontended atomic fetch-add and sequential fence cost", topo_atomic_run},
+    {"falseshare", "two-core false sharing versus counter byte offset", topo_falseshare_run},
+    {"pingpong", "core-to-core token ping-pong one-way latency (RTT/2)", topo_pingpong_run},
+};
+
 static const lb_module_t BENCH_MODULES[] = {
     {"sys", "system calibration and clock diagnostics", SYS_SUBTESTS, LB_ARRAY_SIZE(SYS_SUBTESTS)},
     {"mem", "cache size, line, associativity, and prefetcher probes", MEM_SUBTESTS,
@@ -100,6 +106,8 @@ static const lb_module_t BENCH_MODULES[] = {
      LB_ARRAY_SIZE(BRANCH_SUBTESTS)},
     {"dram", "memory bandwidth and DRAM row-buffer locality", DRAM_SUBTESTS,
      LB_ARRAY_SIZE(DRAM_SUBTESTS)},
+    {"topo", "core-to-core atomics, false sharing, and ping-pong", TOPO_SUBTESTS,
+     LB_ARRAY_SIZE(TOPO_SUBTESTS)},
 };
 
 const lb_module_t *lb_bench_modules(size_t *count)
@@ -517,6 +525,8 @@ static void print_help(const lb_cfg_t *cfg)
     tty_header(cfg, HELP_FLAG_FMT, "    --no-thp", "avoid transparent huge pages (default)");
     tty_header(cfg, HELP_FLAG_FMT, "    --thp", "allow transparent huge pages");
     tty_header(cfg, HELP_FLAG_FMT, "    --long", "extend sys throttle to 10 seconds");
+    tty_header(cfg, HELP_FLAG_FMT, "    --mode <cas|flag>",
+               "topo pingpong token handoff (default: flag)");
 
     tty_section(cfg, "Output");
     tty_header(cfg, HELP_FLAG_FMT, "    --csv", "emit CSV to stdout; diagnostics to stderr");
@@ -642,6 +652,22 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
             cfg->throttle_long = true;
             continue;
         }
+        if (strcmp(arg, "--mode") == 0) {
+            if (i + 1 >= argc) {
+                tty_err("option %s requires a value", arg);
+                return LB_STATUS_INVALID_ARG;
+            }
+            i++;
+            if (strcmp(argv[i], "cas") == 0) {
+                cfg->topo_pingpong_cas = true;
+            } else if (strcmp(argv[i], "flag") == 0) {
+                cfg->topo_pingpong_cas = false;
+            } else {
+                tty_err("invalid value for --mode: '%s' (expected cas or flag)", argv[i]);
+                return LB_STATUS_INVALID_ARG;
+            }
+            continue;
+        }
 
         if (strcmp(arg, "--cpu") == 0 || strcmp(arg, "--qos") == 0 ||
             strcmp(arg, "--max-mem") == 0 || strcmp(arg, "--batch-ms") == 0 ||
@@ -719,6 +745,7 @@ int main(int argc, char **argv)
     cfg.no_color = false;
     cfg.write = false;
     cfg.throttle_long = false;
+    cfg.topo_pingpong_cas = false;
 
     status = parse_args(argc, argv, &cfg, &show_help, &show_version, &module_name, &subtest_name);
     if (status != LB_STATUS_OK) {

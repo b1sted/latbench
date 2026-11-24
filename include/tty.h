@@ -38,8 +38,9 @@ void tty_warn(const char *fmt, ...) PAL_PRINTF_FORMAT(1, 2);
 void tty_err(const char *fmt, ...) PAL_PRINTF_FORMAT(1, 2);
 
 /*
- * Warn when a DVFS canary drift exceeds ten percent in either direction.
- * Drift within the tolerance, or a non-finite value, produces no output.
+ * Warn when a DVFS canary drifts below -10% (real throttling) or above +25%
+ * (an extreme upward spike). Moderate positive drift from Turbo headroom is
+ * expected and silent, as is any non-finite value.
  */
 void tty_warn_drift(double drift_pct);
 
@@ -58,6 +59,19 @@ void tty_warn_drift(double drift_pct);
 lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
                             const stats_steps_t *steps, const char *const *level_names,
                             size_t level_name_count, size_t page_size);
+
+/*
+ * Render an N x N CPU-to-CPU latency matrix for "topo pingpong". latency_ns is
+ * row-major: cell (a, b) is at latency_ns[a * count + b]. Row and column
+ * headings are logical CPU ids 0..count-1 and the diagonal is shown as "-".
+ *
+ * In TTY mode the table is printed with a restrained three-colour heatmap:
+ * fast same-cluster/SMT cells are green, medium cells yellow, and slow
+ * cross-CCX/NUMA cells red. Headings stay unstyled. In CSV mode stdout carries
+ * only "cpu_a,cpu_b,latency_ns" records for the off-diagonal cells.
+ */
+lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint64_t *latency_ns,
+                             size_t count);
 
 /* Render a byte count as a binary unit, for example "27.08 GiB". */
 const char *tty_format_bytes(uint64_t bytes, char *out, size_t capacity);

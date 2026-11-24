@@ -99,11 +99,11 @@ static size_t count_lines(const char *text)
     return lines;
 }
 
-static bool csv_rows_valid(const char *text)
+static bool csv_rows_valid_cols(const char *text, size_t columns)
 {
     const char *line = text;
 
-    if (text == NULL) {
+    if (text == NULL || columns == 0u) {
         return false;
     }
 
@@ -111,14 +111,14 @@ static bool csv_rows_valid(const char *text)
         const char *end = strchr(line, '\n');
         const size_t length = (end != NULL) ? (size_t)(end - line) : strlen(line);
         size_t i = 0u;
-        int commas = 0;
+        size_t commas = 0u;
 
         for (i = 0u; i < length; i++) {
             if (line[i] == ',') {
                 commas++;
             }
         }
-        if (length > 0u && commas != (TEST_CSV_COLUMNS - 1)) {
+        if (length > 0u && commas != (columns - 1u)) {
             return false;
         }
         if (end == NULL) {
@@ -127,6 +127,11 @@ static bool csv_rows_valid(const char *text)
         line = end + 1;
     }
     return true;
+}
+
+static bool csv_rows_valid(const char *text)
+{
+    return csv_rows_valid_cols(text, TEST_CSV_COLUMNS);
 }
 
 static stats_series_t *make_series(void)
@@ -292,12 +297,70 @@ static void test_plot_pages(void)
     stats_series_free(series);
 }
 
+static const uint64_t TEST_MATRIX[16] = {
+    0u, 12u, 42u, 95u, 11u, 0u, 38u, 88u, 40u, 39u, 0u, 72u, 91u, 86u, 70u, 0u,
+};
+
+static void test_matrix_table(void)
+{
+    lb_cfg_t cfg = {0};
+    char output[TEST_CAPTURE_SIZE] = {0};
+
+    cfg.no_color = true;
+    cfg.csv = false;
+    tty_set_no_color(true);
+
+    check_true(capture_start(TEST_CAPTURE_OUT), "matrix capture starts");
+    if (g_stdout_captured) {
+        check_true(tty_print_matrix(&cfg, "Topology ping-pong", TEST_MATRIX, 4u) == LB_STATUS_OK,
+                   "matrix print succeeds");
+        (void)capture_read(TEST_CAPTURE_OUT, output, sizeof(output));
+
+        check_true(strstr(output, "Topology ping-pong:") != NULL, "matrix prints its heading");
+        check_true(strstr(output, "    |") != NULL, "matrix prints a corner and column rule");
+        check_true(strstr(output, "  0 |") != NULL, "matrix prints row cpu 0");
+        check_true(strstr(output, "  3 |") != NULL, "matrix prints row cpu 3");
+        check_true(strstr(output, "-") != NULL, "matrix prints diagonal dashes");
+        check_true(strstr(output, "95") != NULL, "matrix prints a slow latency");
+        check_true(strstr(output, "\x1b") == NULL, "no-color matrix emits no ANSI escapes");
+        check_true(lines_fit(output, TEST_PLOT_WIDTH), "matrix stays within 80 columns");
+    }
+}
+
+static void test_matrix_csv(void)
+{
+    lb_cfg_t cfg = {0};
+    char output[TEST_CAPTURE_SIZE] = {0};
+
+    cfg.no_color = true;
+    cfg.csv = true;
+    tty_set_no_color(true);
+
+    check_true(capture_start(TEST_CAPTURE_CSV), "matrix CSV capture starts");
+    if (g_stdout_captured) {
+        check_true(tty_print_matrix(&cfg, "Topology ping-pong", TEST_MATRIX, 4u) == LB_STATUS_OK,
+                   "matrix CSV print succeeds");
+        (void)capture_read(TEST_CAPTURE_CSV, output, sizeof(output));
+
+        check_true(strstr(output, "cpu_a,cpu_b,latency_ns") == output,
+                   "matrix CSV starts with a clean header");
+        check_true(strstr(output, "0,1,12") != NULL, "matrix CSV prints a row-major pair");
+        check_true(strstr(output, "3,2,70") != NULL, "matrix CSV prints the mirrored pair");
+        check_true(strstr(output, "0,0,") == NULL, "matrix CSV skips the diagonal");
+        check_true(count_lines(output) == 13u, "matrix CSV has a header and twelve pairs");
+        check_true(csv_rows_valid_cols(output, 3u), "matrix CSV rows have three columns");
+        check_true(strstr(output, "Topology") == NULL, "matrix CSV stdout has no prose");
+    }
+}
+
 int main(void)
 {
     test_plot_rejects_null_series();
     test_plot_table();
     test_plot_pages();
     test_plot_csv();
+    test_matrix_table();
+    test_matrix_csv();
 
     if (g_stdout_captured) {
         (void)fflush(stdout);

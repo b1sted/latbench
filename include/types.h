@@ -26,8 +26,9 @@ typedef struct lb_cfg_t {
     bool no_thp;
     bool csv;
     bool no_color;
-    bool write;         /* --write: modify words during the memory-size walk */
-    bool throttle_long; /* --long: extend sys throttle from 5 s to 10 s */
+    bool write;             /* --write: modify words during the memory-size walk */
+    bool throttle_long;     /* --long: extend sys throttle from 5 s to 10 s */
+    bool topo_pingpong_cas; /* --mode cas: CAS token handoff for topo pingpong */
 } lb_cfg_t;
 
 /* One measured latency sample. */

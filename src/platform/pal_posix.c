@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -131,6 +132,76 @@ void pal_mem_free(pal_mem_t *mem)
 }
 
 /*
+ * Apply the requested pin and QoS from inside the new thread. Both calls are
+ * best-effort: a cpuset denial must not prevent the thread from running, and
+ * macOS silently ignores the pin because it has no hard-affinity API. No
+ * pthread_cancel() is used anywhere: Bionic does not provide it.
+ */
+static void *pal_thread_trampoline(void *opaque)
+{
+    pal_thread_t *thread = opaque;
+
+    if (thread == NULL) {
+        return NULL;
+    }
+
+    if (thread->pin_cpu >= 0) {
+        (void)pal_pin_cpu(thread->pin_cpu);
+    }
+    if (thread->qos_perf) {
+        (void)pal_set_qos(true);
+    }
+    if (thread->fn != NULL) {
+        thread->fn(thread->arg);
+    }
+    return NULL;
+}
+
+pal_thread_t *pal_thread_spawn(pal_thread_fn_t fn, void *arg, int32_t pin_cpu, bool qos_perf)
+{
+    pal_thread_t *thread = NULL;
+    int rc = 0;
+
+    if (fn == NULL) {
+        return NULL;
+    }
+
+    thread = calloc(1u, sizeof(*thread));
+    if (thread == NULL) {
+        return NULL;
+    }
+
+    thread->fn = fn;
+    thread->arg = arg;
+    thread->pin_cpu = pin_cpu;
+    thread->qos_perf = qos_perf;
+
+    rc = pthread_create(&thread->handle, NULL, pal_thread_trampoline, thread);
+    if (rc != 0) {
+        free(thread);
+        return NULL;
+    }
+    return thread;
+}
+
+lb_status_t pal_thread_join(pal_thread_t *t)
+{
+    int rc = 0;
+
+    if (t == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    rc = pthread_join(t->handle, NULL);
+    if (rc != 0) {
+        return LB_STATUS_ERROR;
+    }
+
+    free(t);
+    return LB_STATUS_OK;
+}
+
+/*
  * Platform-neutral fallbacks. Linux and macOS provide their own
  * implementations; this block keeps a plain POSIX target buildable.
  */
@@ -195,6 +266,11 @@ lb_status_t pal_set_qos(bool high_perf)
 {
     (void)high_perf;
     return LB_STATUS_UNSUPPORTED;
+}
+
+bool pal_pin_supported(void)
+{
+    return false;
 }
 
 pal_mem_t *pal_mem_alloc(size_t size, uint32_t flags)

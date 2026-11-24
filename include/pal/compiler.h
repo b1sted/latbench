@@ -154,6 +154,45 @@ static inline bool pal_atomic_cas_u32(uint32_t *ptr, uint32_t expected, uint32_t
 #endif
 }
 
+/*
+ * Relaxed atomics for benchmark token handoff. They carry no payload that
+ * needs ordering, so the acquire/release fences of the sequential-consistency
+ * wrappers above would only distort core-to-core latency. On x86-64 these
+ * compile to plain loads and stores instead of locked instructions.
+ */
+static inline uint32_t pal_atomic_load_u32_relaxed(const uint32_t *ptr)
+{
+#if PAL_HAVE_ATOMIC_BUILTINS
+    return __atomic_load_n(ptr, __ATOMIC_RELAXED);
+#else
+    const volatile uint32_t *addr = ptr;
+
+    return *addr;
+#endif
+}
+
+static inline void pal_atomic_store_u32_relaxed(uint32_t *ptr, uint32_t value)
+{
+#if PAL_HAVE_ATOMIC_BUILTINS
+    __atomic_store_n(ptr, value, __ATOMIC_RELAXED);
+#else
+    volatile uint32_t *addr = ptr;
+
+    *addr = value;
+#endif
+}
+
+static inline bool pal_atomic_cas_u32_relaxed(uint32_t *ptr, uint32_t expected, uint32_t desired)
+{
+#if PAL_HAVE_ATOMIC_BUILTINS
+    uint32_t exp = expected;
+    return __atomic_compare_exchange_n(ptr, &exp, desired, false, __ATOMIC_RELAXED,
+                                       __ATOMIC_RELAXED);
+#else
+    return __sync_bool_compare_and_swap(ptr, expected, desired);
+#endif
+}
+
 static inline void pal_atomic_fence_seq(void)
 {
 #if PAL_HAVE_ATOMIC_BUILTINS
