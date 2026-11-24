@@ -24,8 +24,17 @@ static const lb_subtest_t SYS_SUBTESTS[] = {
     {"timer", "clock resolution and pal_now_ns() overhead", sys_timer_run},
 };
 
+static const lb_subtest_t MEM_SUBTESTS[] = {
+    {"size", "cache size from random pointer-chase latency", mem_size_run},
+    {"line", "cache line size from stride latency", mem_line_run},
+    {"assoc", "cache associativity from a set-conflict scan", mem_assoc_run},
+    {"prefetch", "sequential, strided, and random prefetcher probes", mem_prefetch_run},
+};
+
 static const lb_module_t BENCH_MODULES[] = {
     {"sys", "system calibration and clock diagnostics", SYS_SUBTESTS, LB_ARRAY_SIZE(SYS_SUBTESTS)},
+    {"mem", "cache size, line, associativity, and prefetcher probes", MEM_SUBTESTS,
+     LB_ARRAY_SIZE(MEM_SUBTESTS)},
 };
 
 const lb_module_t *lb_bench_modules(size_t *count)
@@ -95,6 +104,10 @@ static void print_help(const lb_cfg_t *cfg)
     tty_section(cfg, "Output");
     tty_header(cfg, HELP_FLAG_FMT, "    --csv", "emit CSV to stdout; diagnostics to stderr");
     tty_header(cfg, HELP_FLAG_FMT, "    --no-color", "disable color output");
+
+    tty_section(cfg, "Memory");
+    tty_header(cfg, HELP_FLAG_FMT, "    --write",
+               "modify words on the mem size walk (dirty write-back)");
 
     tty_section(cfg, "System");
     tty_header(cfg, HELP_FLAG_FMT, "-h, --help", "display this help and exit");
@@ -200,6 +213,10 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
             cfg->no_thp = false;
             continue;
         }
+        if (strcmp(arg, "--write") == 0) {
+            cfg->write = true;
+            continue;
+        }
 
         if (strcmp(arg, "--cpu") == 0 || strcmp(arg, "--qos") == 0 ||
             strcmp(arg, "--max-mem") == 0 || strcmp(arg, "--batch-ms") == 0 ||
@@ -275,6 +292,7 @@ int main(int argc, char **argv)
     cfg.no_thp = true;
     cfg.csv = false;
     cfg.no_color = false;
+    cfg.write = false;
 
     status = parse_args(argc, argv, &cfg, &show_help, &show_version, &module_name, &subtest_name);
     if (status != LB_STATUS_OK) {

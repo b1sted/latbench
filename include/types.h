@@ -26,6 +26,7 @@ typedef struct lb_cfg_t {
     bool no_thp;
     bool csv;
     bool no_color;
+    bool write; /* --write: modify words during the memory-size walk */
 } lb_cfg_t;
 
 /* One measured latency sample. */

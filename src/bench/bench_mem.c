@@ -1,0 +1,859 @@
+/* SPDX-License-Identifier: GPL-3.0 */
+
+#include "bench.h"
+
+#include <inttypes.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "defs.h"
+#include "pal/compiler.h"
+#include "pal/pal.h"
+#include "stats.h"
+#include "tty.h"
+#include "types.h"
+#include "util.h"
+
+/* Cache lines are the natural granularity of the pointer-chase working set. */
+#define MEM_NODE_BYTES 64u
+#define MEM_NODE_PAD (MEM_NODE_BYTES - sizeof(void *) - sizeof(uint64_t))
+
+/* Pointer hops between clock reads in the timed chase loops. */
+#define MEM_CHASE_CHUNK 64u
+#define MEM_CHASE_UNROLL 8u
+
+/* Duration of each DVFS frequency-drift canary measurement. */
+#define MEM_CANARY_MS 20u
+
+/* Arena policy when the platform cannot report the amount of physical RAM. */
+#define MEM_FALLBACK_BUDGET_BYTES (UINT64_C(4) * UINT64_C(1024) * UINT64_C(1024))
+
+/* Smallest arena worth measuring in any subtest. */
+#define MEM_MIN_ARENA_BYTES 4096u
+
+/* mem size: geometric sweep from one page to the safe RAM ceiling. */
+#define MEM_SIZE_START_BYTES 1024u
+#define MEM_SIZE_MIN_BYTES (2u * (size_t)MEM_NODE_BYTES)
+#define MEM_SIZE_MAX_POINTS 64u
+#define MEM_SIZE_SAMPLES 5u
+
+/* mem line: one access per step-th byte, over a buffer larger than L2. */
+#define MEM_LINE_MAX_BYTES (UINT64_C(32) * UINT64_C(1024) * UINT64_C(1024))
+#define MEM_LINE_ACCESSES 524288u
+#define MEM_LINE_REPEATS 5u
+
+/* mem assoc: N lines spaced stride bytes apart, repeated over one cycle. */
+#define MEM_ASSOC_MAX_NODES 32u
+#define MEM_ASSOC_MAX_BYTES (UINT64_C(128) * UINT64_C(1024) * UINT64_C(1024))
+#define MEM_ASSOC_ACCESSES 65536u
+#define MEM_ASSOC_REPEATS 3u
+#define MEM_ASSOC_RATIO_MIN 1.30
+#define MEM_ASSOC_JUMP_MIN_NS 0.25
+
+/* mem prefetch: sequential, strided, and Sattolo-random line walks. */
+#define MEM_PREFETCH_MAX_BYTES (UINT64_C(32) * UINT64_C(1024) * UINT64_C(1024))
+#define MEM_PREFETCH_ACCESSES 1048576u
+#define MEM_PREFETCH_REPEATS 3u
+#define MEM_PREFETCH_CASES 5u
+
+typedef struct mem_node_t {
+    struct mem_node_t *next;
+    uint64_t payload;
+    /* Structural padding: fixes the node stride at one cache line. */
+    uint8_t pad[MEM_NODE_PAD]; /* cppcheck-suppress unusedStructMember */
+} mem_node_t;
+
+typedef struct mem_pattern_t {
+    const char *name;
+    size_t step;
+    bool backward;
+    bool random;
+} mem_pattern_t;
+
+static const char *const MEM_SIZE_LEVELS[] = {"L1", "L2", "L3"};
+
+static const size_t MEM_ASSOC_STRIDES[] = {
+    2048u,   4096u,   8192u,   16384u,   32768u,   65536u,
+    131072u, 262144u, 524288u, 1048576u, 2097152u, 4194304u,
+};
+
+static const size_t MEM_ASSOC_COLUMNS[] = {1u, 2u, 4u, 8u, 16u, 32u};
+
+static const size_t MEM_LINE_STEPS[] = {1u, 2u, 4u, 8u, 16u, 32u, 64u, 128u, 256u, 512u};
+
+/*
+ * Volatile result sink. Every timed loop publishes its checksum here so the
+ * optimizer cannot discard the dependent loads or the dirty stores.
+ */
+static volatile uint64_t g_mem_sink = 0u;
+
+static size_t mem_arena_cap(const lb_cfg_t *cfg, uint64_t limit_bytes)
+{
+    uint64_t budget = pal_safe_max_mem_bytes((uint64_t)cfg->max_mem_mb);
+
+    if (budget == 0u) {
+        budget = MEM_FALLBACK_BUDGET_BYTES;
+    }
+
+    /* Leave one eighth of the budget for Sattolo index arrays. */
+    budget = (budget / 9u) * 8u;
+    if (budget > limit_bytes) {
+        budget = limit_bytes;
+    }
+#if SIZE_MAX < UINT64_MAX
+    if (budget > (uint64_t)SIZE_MAX) {
+        budget = (uint64_t)SIZE_MAX;
+    }
+#endif
+    return (size_t)budget;
+}
+
+static uint32_t mem_arena_flags(const lb_cfg_t *cfg)
+{
+    return cfg->no_thp ? PAL_MEM_NO_THP : PAL_MEM_THP;
+}
+
+static void mem_apply_runtime(const lb_cfg_t *cfg)
+{
+    if (cfg->cpu_id >= 0) {
+        if (pal_pin_cpu(cfg->cpu_id) != LB_STATUS_OK) {
+            tty_warn("CPU pinning to %" PRId32 " was not applied", cfg->cpu_id);
+        }
+    }
+
+    if (cfg->qos_set) {
+        if (pal_set_qos(cfg->qos_perf) != LB_STATUS_OK) {
+            tty_warn("QoS request '%s' was not applied", cfg->qos_perf ? "perf" : "bg");
+        }
+    }
+}
+
+static void mem_cool(const lb_cfg_t *cfg)
+{
+    if (cfg->cool_ms > 0u) {
+        pal_sleep_ms(cfg->cool_ms);
+    }
+}
+
+static void mem_canary_finish(const lb_cfg_t *cfg, uint64_t baseline)
+{
+    const uint64_t after = stats_canary_measure(MEM_CANARY_MS);
+    const double drift = stats_canary_drift_pct(baseline, after);
+
+    tty_warn_drift(drift);
+    tty_kv(cfg, "DVFS drift", "%+.1f%%", drift);
+}
+
+static lb_status_t mem_build_chain(mem_node_t *nodes, size_t count, size_t *indices, uint64_t seed)
+{
+    size_t i = 0u;
+    lb_status_t status = LB_STATUS_OK;
+
+    if (nodes == NULL || count == 0u) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    if (count == 1u) {
+        nodes[0].next = &nodes[0];
+        nodes[0].payload = 0u;
+        return LB_STATUS_OK;
+    }
+    if (indices == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    status = util_sattolo_indices(indices, count, seed);
+    if (status != LB_STATUS_OK) {
+        return status;
+    }
+
+    for (i = 0u; i < count; i++) {
+        nodes[i].next = &nodes[indices[i]];
+        nodes[i].payload = (uint64_t)i;
+    }
+    return LB_STATUS_OK;
+}
+
+/*
+ * One pointer-chase hop in write mode. The payload update dirties the node's
+ * cache line, forcing a write-back when the line is evicted.
+ */
+static inline mem_node_t *mem_advance_write(mem_node_t *node)
+{
+    mem_node_t *const next = node->next;
+
+    next->payload += 1u;
+    return next;
+}
+
+static PAL_NOINLINE void mem_chase_read_until(const mem_node_t *start, uint64_t deadline,
+                                              uint64_t *hops_out)
+{
+    const mem_node_t *p = start;
+    uint64_t total = 0u;
+
+    for (;;) {
+        size_t chunk = 0u;
+
+        for (chunk = 0u; chunk < MEM_CHASE_CHUNK; chunk++) {
+            LB_UNROLL_8(p = p->next);
+        }
+        total += (uint64_t)MEM_CHASE_CHUNK * (uint64_t)MEM_CHASE_UNROLL;
+        if (pal_now_ns() >= deadline) {
+            break;
+        }
+    }
+
+    PAL_BARRIER();
+    g_mem_sink = (uint64_t)(uintptr_t)p;
+    *hops_out = total;
+}
+
+static PAL_NOINLINE void mem_chase_write_until(mem_node_t *start, uint64_t deadline,
+                                               uint64_t *hops_out)
+{
+    mem_node_t *p = start;
+    uint64_t total = 0u;
+
+    for (;;) {
+        size_t chunk = 0u;
+
+        for (chunk = 0u; chunk < MEM_CHASE_CHUNK; chunk++) {
+            LB_UNROLL_8(p = mem_advance_write(p));
+        }
+        total += (uint64_t)MEM_CHASE_CHUNK * (uint64_t)MEM_CHASE_UNROLL;
+        if (pal_now_ns() >= deadline) {
+            break;
+        }
+    }
+
+    PAL_BARRIER();
+    g_mem_sink = (uint64_t)(uintptr_t)p;
+    *hops_out = total;
+}
+
+static PAL_NOINLINE uint64_t mem_chase_hops(const mem_node_t *start, size_t hops)
+{
+    const mem_node_t *p = start;
+    size_t done = 0u;
+
+    while ((done + MEM_CHASE_UNROLL) <= hops) {
+        LB_UNROLL_8(p = p->next);
+        done += MEM_CHASE_UNROLL;
+    }
+    while (done < hops) {
+        p = p->next;
+        done++;
+    }
+
+    PAL_BARRIER();
+    g_mem_sink = (uint64_t)(uintptr_t)p;
+    return g_mem_sink;
+}
+
+static double mem_size_sample(mem_node_t *start, uint32_t batch_ms, bool write)
+{
+    const uint64_t begin = pal_now_ns();
+    const uint64_t batch_ns = (uint64_t)batch_ms * UINT64_C(1000000);
+    const uint64_t deadline = begin + batch_ns;
+    uint64_t hops = 0u;
+    uint64_t end = 0u;
+
+    if (write) {
+        mem_chase_write_until(start, deadline, &hops);
+    } else {
+        mem_chase_read_until(start, deadline, &hops);
+    }
+
+    end = pal_now_ns();
+    if (hops == 0u) {
+        return 0.0;
+    }
+    if (end <= begin) {
+        end = begin + 1u;
+    }
+    return (double)(end - begin) / (double)hops;
+}
+
+lb_status_t mem_size_run(const lb_cfg_t *cfg)
+{
+    pal_mem_t *arena = NULL;
+    mem_node_t *nodes = NULL;
+    size_t *indices = NULL;
+    stats_series_t *series = NULL;
+    stats_steps_t steps = {0};
+    double samples[MEM_SIZE_SAMPLES] = {0.0};
+    size_t arena_bytes = 0u;
+    size_t max_nodes = 0u;
+    size_t size = 0u;
+    size_t points = 0u;
+    uint64_t baseline = 0u;
+    lb_status_t status = LB_STATUS_NOMEM;
+
+    if (cfg == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    mem_apply_runtime(cfg);
+
+    arena_bytes = mem_arena_cap(cfg, UINT64_MAX);
+    arena_bytes = (arena_bytes / MEM_NODE_BYTES) * MEM_NODE_BYTES;
+    if (arena_bytes < MEM_SIZE_MIN_BYTES) {
+        tty_err("memory budget is too small for mem size");
+        return LB_STATUS_NOMEM;
+    }
+    max_nodes = arena_bytes / MEM_NODE_BYTES;
+
+    arena = pal_mem_alloc(arena_bytes, mem_arena_flags(cfg));
+    if (arena == NULL) {
+        tty_err("cannot allocate a %zu-byte mem size arena", arena_bytes);
+        goto cleanup;
+    }
+    nodes = pal_mem_data(arena);
+    if (nodes == NULL) {
+        goto cleanup;
+    }
+
+    indices = malloc(max_nodes * sizeof(*indices));
+    if (indices == NULL) {
+        goto cleanup;
+    }
+
+    series = stats_series_create("mem size", 32u);
+    if (series == NULL) {
+        goto cleanup;
+    }
+
+    {
+        char human[LB_NAME_MAX] = {0};
+
+        (void)tty_format_bytes((uint64_t)arena_bytes, human, sizeof(human));
+        tty_kv(cfg, "Walk mode", "%s", cfg->write ? "write (dirty)" : "read-only");
+        tty_kv(cfg, "Arena limit", "%s", human);
+        tty_kv(cfg, "Batch / samples", "%" PRIu32 " ms / %u", cfg->batch_ms, MEM_SIZE_SAMPLES);
+    }
+
+    baseline = stats_canary_measure(MEM_CANARY_MS);
+
+    size = ((size_t)MEM_SIZE_START_BYTES / MEM_NODE_BYTES) * MEM_NODE_BYTES;
+    if (size < MEM_SIZE_MIN_BYTES) {
+        size = MEM_SIZE_MIN_BYTES;
+    }
+    if (size > arena_bytes) {
+        size = arena_bytes;
+    }
+
+    for (;;) {
+        const size_t count = size / MEM_NODE_BYTES;
+        const uint64_t seed =
+            UINT64_C(0x9e3779b97f4a7c15) ^ ((uint64_t)count * UINT64_C(0x2545f4914f6cdd1d));
+        size_t sample = 0u;
+
+        status = mem_build_chain(nodes, count, indices, seed);
+        if (status != LB_STATUS_OK) {
+            goto cleanup;
+        }
+
+        for (sample = 0u; sample < MEM_SIZE_SAMPLES; sample++) {
+            samples[sample] = mem_size_sample(nodes, cfg->batch_ms, cfg->write);
+        }
+        mem_cool(cfg);
+
+        status = stats_series_push(series, size, samples, MEM_SIZE_SAMPLES);
+        if (status != LB_STATUS_OK) {
+            goto cleanup;
+        }
+        points++;
+
+        if (size >= arena_bytes) {
+            break;
+        }
+
+        {
+            size_t next = size + (size / 4u);
+
+            if (next < size) {
+                next = arena_bytes;
+            }
+            if (next > arena_bytes || (points + 1u) >= MEM_SIZE_MAX_POINTS) {
+                next = arena_bytes;
+            }
+            next = (next / MEM_NODE_BYTES) * MEM_NODE_BYTES;
+            if (next <= size) {
+                next = size + MEM_NODE_BYTES;
+            }
+            if (next > arena_bytes) {
+                break;
+            }
+            size = next;
+        }
+    }
+
+    mem_canary_finish(cfg, baseline);
+
+    status = stats_series_detect_steps(series, &steps);
+    if (status != LB_STATUS_OK) {
+        goto cleanup;
+    }
+    status = tty_plot_series(cfg, series, &steps, MEM_SIZE_LEVELS, LB_ARRAY_SIZE(MEM_SIZE_LEVELS));
+
+cleanup:
+    stats_series_free(series);
+    free(indices);
+    pal_mem_free(arena);
+    return status;
+}
+
+static inline size_t mem_next_index(size_t index, size_t step, size_t length, bool backward)
+{
+    if (backward) {
+        if (index >= step) {
+            return index - step;
+        }
+        return length - (step - index);
+    }
+
+    index += step;
+    if (index >= length) {
+        return index - length;
+    }
+    return index;
+}
+
+static PAL_NOINLINE uint64_t mem_line_probe(const uint8_t *buf, size_t length, size_t step,
+                                            size_t accesses)
+{
+    uint64_t sum = 0u;
+    size_t index = 0u;
+    size_t done = 0u;
+
+    PAL_NO_VECTORIZE_LOOP
+    while (done < accesses) {
+        sum += (uint64_t)buf[index];
+        index = mem_next_index(index, step, length, false);
+        done++;
+    }
+
+    PAL_BARRIER();
+    return sum;
+}
+
+lb_status_t mem_line_run(const lb_cfg_t *cfg)
+{
+    pal_mem_t *arena = NULL;
+    const uint8_t *buf = NULL;
+    stats_series_t *series = NULL;
+    double samples[MEM_LINE_REPEATS] = {0.0};
+    size_t buffer_bytes = 0u;
+    size_t step_index = 0u;
+    uint64_t baseline = 0u;
+    lb_status_t status = LB_STATUS_NOMEM;
+
+    if (cfg == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    mem_apply_runtime(cfg);
+
+    buffer_bytes = mem_arena_cap(cfg, MEM_LINE_MAX_BYTES);
+    if (buffer_bytes < MEM_MIN_ARENA_BYTES) {
+        tty_err("memory budget is too small for mem line");
+        return LB_STATUS_NOMEM;
+    }
+
+    arena = pal_mem_alloc(buffer_bytes, mem_arena_flags(cfg));
+    if (arena == NULL) {
+        tty_err("cannot allocate a %zu-byte mem line buffer", buffer_bytes);
+        goto cleanup;
+    }
+    buf = pal_mem_data(arena);
+    if (buf == NULL) {
+        goto cleanup;
+    }
+
+    series = stats_series_create("mem line", LB_ARRAY_SIZE(MEM_LINE_STEPS));
+    if (series == NULL) {
+        goto cleanup;
+    }
+
+    {
+        char human[LB_NAME_MAX] = {0};
+
+        (void)tty_format_bytes((uint64_t)buffer_bytes, human, sizeof(human));
+        tty_kv(cfg, "Buffer", "%s", human);
+        tty_kv(cfg, "Accesses / repeats", "%u / %u", MEM_LINE_ACCESSES, MEM_LINE_REPEATS);
+    }
+
+    baseline = stats_canary_measure(MEM_CANARY_MS);
+
+    for (step_index = 0u; step_index < LB_ARRAY_SIZE(MEM_LINE_STEPS); step_index++) {
+        const size_t step = MEM_LINE_STEPS[step_index];
+        size_t repeat = 0u;
+
+        for (repeat = 0u; repeat < MEM_LINE_REPEATS; repeat++) {
+            const uint64_t begin = pal_now_ns();
+            const uint64_t sum = mem_line_probe(buf, buffer_bytes, step, MEM_LINE_ACCESSES);
+            uint64_t end = pal_now_ns();
+
+            g_mem_sink = sum;
+            if (end <= begin) {
+                end = begin + 1u;
+            }
+            samples[repeat] = (double)(end - begin) / (double)(size_t)MEM_LINE_ACCESSES;
+        }
+        mem_cool(cfg);
+
+        status = stats_series_push(series, step, samples, MEM_LINE_REPEATS);
+        if (status != LB_STATUS_OK) {
+            goto cleanup;
+        }
+    }
+
+    mem_canary_finish(cfg, baseline);
+
+    status = tty_plot_series(cfg, series, NULL, NULL, 0u);
+
+cleanup:
+    stats_series_free(series);
+    pal_mem_free(arena);
+    return status;
+}
+
+static void mem_assoc_table(const lb_cfg_t *cfg, double latencies[][MEM_ASSOC_MAX_NODES],
+                            const size_t limits[], size_t stride_count)
+{
+    size_t stride_index = 0u;
+
+    tty_section(cfg, "Associativity");
+    tty_header(cfg, "  %-10s %8s %8s %8s %8s %8s %8s  %s", "Stride", "N=1", "N=2", "N=4", "N=8",
+               "N=16", "N=32", "Knee");
+
+    for (stride_index = 0u; stride_index < stride_count; stride_index++) {
+        const size_t stride = MEM_ASSOC_STRIDES[stride_index];
+        const size_t limit = limits[stride_index];
+        char stride_text[LB_NAME_MAX] = {0};
+        char cells[LB_ARRAY_SIZE(MEM_ASSOC_COLUMNS)][16] = {{0}};
+        char knee[LB_NAME_MAX] = {0};
+        char line[LB_LINE_MAX] = {0};
+        size_t best_node = 0u;
+        double best_ratio = 0.0;
+        size_t column = 0u;
+
+        (void)tty_format_bytes((uint64_t)stride, stride_text, sizeof(stride_text));
+
+        for (column = 0u; column < LB_ARRAY_SIZE(MEM_ASSOC_COLUMNS); column++) {
+            const size_t nodes = MEM_ASSOC_COLUMNS[column];
+
+            if (nodes <= limit) {
+                (void)snprintf(cells[column], sizeof(cells[column]), "%.2f",
+                               latencies[stride_index][nodes - 1u]);
+            } else {
+                (void)snprintf(cells[column], sizeof(cells[column]), "-");
+            }
+        }
+
+        for (column = 1u; column < limit; column++) {
+            const double lower = latencies[stride_index][column - 1u];
+            const double upper = latencies[stride_index][column];
+            double ratio = 0.0;
+
+            if (!(lower > 0.0) || !(upper > lower)) {
+                continue;
+            }
+            ratio = upper / lower;
+            if (ratio < MEM_ASSOC_RATIO_MIN || (upper - lower) < MEM_ASSOC_JUMP_MIN_NS) {
+                continue;
+            }
+            if (ratio > best_ratio) {
+                best_ratio = ratio;
+                best_node = column + 1u;
+            }
+        }
+
+        if (best_node > 0u) {
+            (void)snprintf(knee, sizeof(knee), "N=%zu x%.2f", best_node, best_ratio);
+        } else {
+            (void)snprintf(knee, sizeof(knee), "none");
+        }
+
+        (void)snprintf(line, sizeof(line), "  %-10s %8s %8s %8s %8s %8s %8s  %s", stride_text,
+                       cells[0], cells[1], cells[2], cells[3], cells[4], cells[5], knee);
+        tty_header(cfg, "%s", line);
+    }
+}
+
+lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
+{
+    pal_mem_t *arena = NULL;
+    uint8_t *base = NULL;
+    double latencies[LB_ARRAY_SIZE(MEM_ASSOC_STRIDES)][MEM_ASSOC_MAX_NODES] = {{0.0}};
+    size_t limits[LB_ARRAY_SIZE(MEM_ASSOC_STRIDES)] = {0u};
+    size_t buffer_bytes = 0u;
+    size_t stride_count = LB_ARRAY_SIZE(MEM_ASSOC_STRIDES);
+    size_t stride_index = 0u;
+    uint64_t baseline = 0u;
+    lb_status_t status = LB_STATUS_NOMEM;
+
+    if (cfg == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    mem_apply_runtime(cfg);
+
+    buffer_bytes = mem_arena_cap(cfg, MEM_ASSOC_MAX_BYTES);
+    if (buffer_bytes < MEM_MIN_ARENA_BYTES) {
+        tty_err("memory budget is too small for mem assoc");
+        return LB_STATUS_NOMEM;
+    }
+
+    arena = pal_mem_alloc(buffer_bytes, mem_arena_flags(cfg));
+    if (arena == NULL) {
+        tty_err("cannot allocate a %zu-byte mem assoc buffer", buffer_bytes);
+        goto cleanup;
+    }
+    base = pal_mem_data(arena);
+    if (base == NULL) {
+        goto cleanup;
+    }
+
+    {
+        char human[LB_NAME_MAX] = {0};
+
+        (void)tty_format_bytes((uint64_t)buffer_bytes, human, sizeof(human));
+        tty_kv(cfg, "Buffer", "%s", human);
+        tty_kv(cfg, "Accesses / repeats", "%u / %u", MEM_ASSOC_ACCESSES, MEM_ASSOC_REPEATS);
+    }
+
+    tty_csv_row(cfg, "mem,assoc,stride_bytes,nodes,ns_per_access");
+
+    baseline = stats_canary_measure(MEM_CANARY_MS);
+
+    for (stride_index = 0u; stride_index < stride_count; stride_index++) {
+        const size_t stride = MEM_ASSOC_STRIDES[stride_index];
+        size_t nodes = buffer_bytes / stride;
+
+        if (nodes > MEM_ASSOC_MAX_NODES) {
+            nodes = MEM_ASSOC_MAX_NODES;
+        }
+        limits[stride_index] = nodes;
+
+        if (nodes == 0u) {
+            continue;
+        }
+
+        {
+            size_t node_count = 1u;
+
+            for (node_count = 1u; node_count <= nodes; node_count++) {
+                size_t order[MEM_ASSOC_MAX_NODES] = {0u};
+                double samples[MEM_ASSOC_REPEATS] = {0.0};
+                size_t i = 0u;
+                size_t repeat = 0u;
+                const uint64_t seed =
+                    UINT64_C(0x243f6a8885a308d3) ^ ((uint64_t)stride << 24u) ^ (uint64_t)node_count;
+
+                status = util_sattolo_indices(order, node_count, seed);
+                if (status != LB_STATUS_OK) {
+                    goto cleanup;
+                }
+                for (i = 0u; i < node_count; i++) {
+                    mem_node_t *const node = (mem_node_t *)(void *)(base + (i * stride));
+                    mem_node_t *const next = (mem_node_t *)(void *)(base + (order[i] * stride));
+
+                    node->next = next;
+                    node->payload = (uint64_t)i;
+                }
+
+                for (repeat = 0u; repeat < MEM_ASSOC_REPEATS; repeat++) {
+                    const uint64_t begin = pal_now_ns();
+                    const uint64_t sink =
+                        mem_chase_hops((mem_node_t *)(void *)base, MEM_ASSOC_ACCESSES);
+                    uint64_t end = pal_now_ns();
+
+                    g_mem_sink = sink;
+                    if (end <= begin) {
+                        end = begin + 1u;
+                    }
+                    samples[repeat] = (double)(end - begin) / (double)(size_t)MEM_ASSOC_ACCESSES;
+                }
+                mem_cool(cfg);
+
+                latencies[stride_index][node_count - 1u] =
+                    stats_percentile(samples, MEM_ASSOC_REPEATS, STATS_NOISE_PERCENTILE);
+
+                tty_csv_row(cfg, "mem,assoc,%zu,%zu,%.3f", stride, node_count,
+                            latencies[stride_index][node_count - 1u]);
+                status = LB_STATUS_OK;
+            }
+        }
+    }
+
+    mem_canary_finish(cfg, baseline);
+    mem_assoc_table(cfg, latencies, limits, stride_count);
+    status = LB_STATUS_OK;
+
+cleanup:
+    pal_mem_free(arena);
+    return status;
+}
+
+static PAL_NOINLINE uint64_t mem_stream_probe(const uint8_t *buf, size_t length, size_t step,
+                                              bool backward, size_t accesses)
+{
+    uint64_t sum = 0u;
+    size_t index = backward ? (length - 1u) : 0u;
+    size_t done = 0u;
+
+    PAL_NO_VECTORIZE_LOOP
+    while (done < accesses) {
+        sum += (uint64_t)buf[index];
+        index = mem_next_index(index, step, length, backward);
+        done++;
+    }
+
+    PAL_BARRIER();
+    return sum;
+}
+
+static double mem_pattern_ns_per_access(const uint8_t *buf, size_t length,
+                                        const mem_pattern_t *pattern, size_t accesses)
+{
+    const uint64_t begin = pal_now_ns();
+    const uint64_t sum = mem_stream_probe(buf, length, pattern->step, pattern->backward, accesses);
+    uint64_t end = pal_now_ns();
+
+    g_mem_sink = sum;
+    if (end <= begin) {
+        end = begin + 1u;
+    }
+    return (double)(end - begin) / (double)accesses;
+}
+
+lb_status_t mem_prefetch_run(const lb_cfg_t *cfg)
+{
+    pal_mem_t *arena = NULL;
+    uint8_t *buf = NULL;
+    mem_node_t *nodes = NULL;
+    size_t *indices = NULL;
+    double results[MEM_PREFETCH_CASES] = {0.0};
+    double samples[MEM_PREFETCH_REPEATS] = {0.0};
+    mem_pattern_t patterns[MEM_PREFETCH_CASES] = {{0}};
+    size_t buffer_bytes = 0u;
+    size_t node_count = 0u;
+    size_t page_step = 0u;
+    size_t case_index = 0u;
+    uint64_t baseline = 0u;
+    lb_status_t status = LB_STATUS_NOMEM;
+
+    if (cfg == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    mem_apply_runtime(cfg);
+
+    buffer_bytes = mem_arena_cap(cfg, MEM_PREFETCH_MAX_BYTES);
+    if (buffer_bytes < MEM_MIN_ARENA_BYTES) {
+        tty_err("memory budget is too small for mem prefetch");
+        return LB_STATUS_NOMEM;
+    }
+
+    arena = pal_mem_alloc(buffer_bytes, mem_arena_flags(cfg));
+    if (arena == NULL) {
+        tty_err("cannot allocate a %zu-byte mem prefetch buffer", buffer_bytes);
+        goto cleanup;
+    }
+    buf = pal_mem_data(arena);
+    if (buf == NULL) {
+        goto cleanup;
+    }
+
+    node_count = buffer_bytes / MEM_NODE_BYTES;
+    if (node_count < 2u) {
+        goto cleanup;
+    }
+    nodes = (mem_node_t *)(void *)buf;
+    indices = malloc(node_count * sizeof(*indices));
+    if (indices == NULL) {
+        goto cleanup;
+    }
+    status = mem_build_chain(nodes, node_count, indices,
+                             UINT64_C(0x13198a2e03707344) ^ (uint64_t)node_count);
+    if (status != LB_STATUS_OK) {
+        goto cleanup;
+    }
+
+    page_step = pal_page_size() + MEM_NODE_BYTES;
+    if (page_step >= buffer_bytes / 2u) {
+        page_step = buffer_bytes / 2u;
+    }
+    if (page_step == 0u) {
+        page_step = 1u;
+    }
+
+    patterns[0].name = "sequential";
+    patterns[0].step = 1u;
+    patterns[1].name = "stride-64";
+    patterns[1].step = MEM_NODE_BYTES;
+    patterns[2].name = "page-cross";
+    patterns[2].step = page_step;
+    patterns[3].name = "page-cross-back";
+    patterns[3].step = page_step;
+    patterns[3].backward = true;
+    patterns[4].name = "sattolo-random";
+    patterns[4].random = true;
+
+    {
+        char human[LB_NAME_MAX] = {0};
+
+        (void)tty_format_bytes((uint64_t)buffer_bytes, human, sizeof(human));
+        tty_kv(cfg, "Buffer", "%s", human);
+        tty_kv(cfg, "Accesses / repeats", "%u / %u", MEM_PREFETCH_ACCESSES, MEM_PREFETCH_REPEATS);
+    }
+
+    tty_csv_row(cfg, "mem,prefetch,variant,ns_per_access");
+
+    baseline = stats_canary_measure(MEM_CANARY_MS);
+
+    for (case_index = 0u; case_index < MEM_PREFETCH_CASES; case_index++) {
+        size_t repeat = 0u;
+
+        for (repeat = 0u; repeat < MEM_PREFETCH_REPEATS; repeat++) {
+            if (patterns[case_index].random) {
+                const uint64_t begin = pal_now_ns();
+                const uint64_t sink = mem_chase_hops(nodes, MEM_PREFETCH_ACCESSES);
+                uint64_t end = pal_now_ns();
+
+                g_mem_sink = sink;
+                if (end <= begin) {
+                    end = begin + 1u;
+                }
+                samples[repeat] = (double)(end - begin) / (double)(size_t)MEM_PREFETCH_ACCESSES;
+            } else {
+                samples[repeat] = mem_pattern_ns_per_access(
+                    buf, buffer_bytes, &patterns[case_index], MEM_PREFETCH_ACCESSES);
+            }
+        }
+        mem_cool(cfg);
+
+        results[case_index] =
+            stats_percentile(samples, MEM_PREFETCH_REPEATS, STATS_NOISE_PERCENTILE);
+        tty_csv_row(cfg, "mem,prefetch,%s,%.3f", patterns[case_index].name, results[case_index]);
+    }
+
+    mem_canary_finish(cfg, baseline);
+
+    tty_section(cfg, "Prefetcher");
+    tty_header(cfg, "  %-22s %12s", "Pattern", "ns/access");
+    for (case_index = 0u; case_index < MEM_PREFETCH_CASES; case_index++) {
+        tty_header(cfg, "  %-22s %12.3f", patterns[case_index].name, results[case_index]);
+    }
+    status = LB_STATUS_OK;
+
+cleanup:
+    free(indices);
+    pal_mem_free(arena);
+    return status;
+}

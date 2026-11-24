@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 /* NOLINTEND(bugprone-reserved-identifier, readability-identifier-naming) */
 
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -30,6 +31,25 @@ size_t pal_page_size(void)
         return 4096u;
     }
     return (size_t)page;
+}
+
+void pal_sleep_ms(uint32_t milliseconds)
+{
+    struct timespec request = {0, 0};
+
+    if (milliseconds == 0u) {
+        return;
+    }
+
+    request.tv_sec = (time_t)(milliseconds / 1000u);
+    request.tv_nsec = (long)((milliseconds % 1000u) * 1000000u);
+
+    /* Restart after a signal so a requested pause is not cut short. */
+    while (nanosleep(&request, &request) != 0) {
+        if (errno != EINTR) {
+            break;
+        }
+    }
 }
 
 const char *pal_arch_name(void)
