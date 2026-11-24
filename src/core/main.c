@@ -37,6 +37,7 @@ static volatile uint64_t g_lb_selftest_sink = 0u;
 static const lb_subtest_t SYS_SUBTESTS[] = {
     {"info", "platform limits and runtime settings", sys_info_run},
     {"timer", "clock resolution and pal_now_ns() overhead", sys_timer_run},
+    {"throttle", "5-10 s sustained-load turbo and throttle decay", sys_throttle_run},
 };
 
 static const lb_subtest_t MEM_SUBTESTS[] = {
@@ -324,6 +325,7 @@ static void print_help(const lb_cfg_t *cfg)
     tty_header(cfg, HELP_FLAG_FMT, "    --cool-ms <ms>", "cool-down between batches (default: 0)");
     tty_header(cfg, HELP_FLAG_FMT, "    --no-thp", "avoid transparent huge pages (default)");
     tty_header(cfg, HELP_FLAG_FMT, "    --thp", "allow transparent huge pages");
+    tty_header(cfg, HELP_FLAG_FMT, "    --long", "extend sys throttle to 10 seconds");
 
     tty_section(cfg, "Output");
     tty_header(cfg, HELP_FLAG_FMT, "    --csv", "emit CSV to stdout; diagnostics to stderr");
@@ -445,6 +447,10 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
             cfg->write = true;
             continue;
         }
+        if (strcmp(arg, "--long") == 0) {
+            cfg->throttle_long = true;
+            continue;
+        }
 
         if (strcmp(arg, "--cpu") == 0 || strcmp(arg, "--qos") == 0 ||
             strcmp(arg, "--max-mem") == 0 || strcmp(arg, "--batch-ms") == 0 ||
@@ -521,6 +527,7 @@ int main(int argc, char **argv)
     cfg.csv = false;
     cfg.no_color = false;
     cfg.write = false;
+    cfg.throttle_long = false;
 
     status = parse_args(argc, argv, &cfg, &show_help, &show_version, &module_name, &subtest_name);
     if (status != LB_STATUS_OK) {

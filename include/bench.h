@@ -51,6 +51,7 @@ const lb_module_t *lb_bench_modules(size_t *count);
 /* System calibration and clock subtests, implemented in src/bench/bench_sys.c. */
 lb_status_t sys_info_run(const lb_cfg_t *cfg);
 lb_status_t sys_timer_run(const lb_cfg_t *cfg);
+lb_status_t sys_throttle_run(const lb_cfg_t *cfg);
 
 /* Cache subtests, implemented in src/bench/bench_mem.c. */
 lb_status_t mem_size_run(const lb_cfg_t *cfg);

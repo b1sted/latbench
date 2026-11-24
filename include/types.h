@@ -26,7 +26,8 @@ typedef struct lb_cfg_t {
     bool no_thp;
     bool csv;
     bool no_color;
-    bool write; /* --write: modify words during the memory-size walk */
+    bool write;         /* --write: modify words during the memory-size walk */
+    bool throttle_long; /* --long: extend sys throttle from 5 s to 10 s */
 } lb_cfg_t;
 
 /* One measured latency sample. */
