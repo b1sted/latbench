@@ -213,6 +213,9 @@ void tty_progress(const lb_cfg_t *cfg, const char *fmt, ...)
 }
 
 static void tty_status(const char *color, const char *prefix, const char *fmt, va_list args)
+    PAL_PRINTF_FORMAT(3, 0);
+
+static void tty_status(const char *color, const char *prefix, const char *fmt, va_list args)
 {
     bool use_color = false;
 

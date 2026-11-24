@@ -76,6 +76,14 @@ lb_status_t pal_set_qos(bool high_perf);
 bool pal_pin_supported(void);
 
 /*
+ * True when independent integer chains are expected to overlap in the pipeline.
+ * Out-of-order cores report true; in-order 32-bit ARMv7 cores report false so
+ * the ILP selftest does not demand scaling that the microarchitecture cannot
+ * provide.
+ */
+bool pal_ilp_scaling_expected(void);
+
+/*
  * Start a joinable thread. pin_cpu >= 0 asks the new thread to pin itself to
  * that logical CPU before fn runs; pass -1 to leave affinity untouched. When
  * qos_perf is true the new thread requests interactive/high-performance QoS

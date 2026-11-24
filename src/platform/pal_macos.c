@@ -84,6 +84,11 @@ bool pal_pin_supported(void)
     return false;
 }
 
+bool pal_ilp_scaling_expected(void)
+{
+    return true;
+}
+
 lb_status_t pal_set_qos(bool high_perf)
 {
     qos_class_t qos = QOS_CLASS_BACKGROUND;

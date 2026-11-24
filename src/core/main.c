@@ -31,7 +31,10 @@
 #define LB_SELFTEST_BRANCH_ITERATIONS UINT64_C(4000000)
 #define LB_SELFTEST_BRANCH_WARMUP UINT64_C(200000)
 #define LB_SELFTEST_BRANCH_ROUNDS 3u
-#define LB_SELFTEST_BRANCH_RATIO_MIN 1.8
+/* In-order cores pay a smaller absolute mispredict penalty on this loop, so a
+ * cmov conversion still sits far below this floor while real branches exceed
+ * it. The 50/50 pattern is ~1.3x on ARMv7 and ~3.5x on x86-64. */
+#define LB_SELFTEST_BRANCH_RATIO_MIN 1.2
 
 /* Core ILP sanity: four independent chains must beat a single chain. */
 #define LB_SELFTEST_ILP_ITERATIONS UINT64_C(8000000)
@@ -480,6 +483,10 @@ static bool lb_selftest_ilp_check(const lb_cfg_t *cfg)
                LB_SELFTEST_ILP_CHAINS, rate_four / 1.0e6, gain);
 
     if (gain < LB_SELFTEST_ILP_GAIN_MIN) {
+        if (!pal_ilp_scaling_expected()) {
+            tty_header(cfg, "  Core ILP: no parallel scaling expected on this in-order core");
+            return true;
+        }
         tty_err("selftest: core ilp gain %.2fx is below %.1fx (chains serialized?)", gain,
                 LB_SELFTEST_ILP_GAIN_MIN);
         return false;

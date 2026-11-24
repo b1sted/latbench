@@ -9,3 +9,11 @@
 # Stray object and dependency files next to the sources.
 *.o
 *.d
+
+# Standalone test capture files written to the working directory.
+/test_tty_capture.out
+/test_tty_capture.csv
+
+# Generated benchmark reports stay local and are never committed.
+/latbench-*.txt
+/latbench-output.txt

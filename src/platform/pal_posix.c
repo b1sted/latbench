@@ -1006,6 +1006,11 @@ bool pal_pin_supported(void)
     return false;
 }
 
+bool pal_ilp_scaling_expected(void)
+{
+    return true;
+}
+
 pal_mem_t *pal_mem_alloc(size_t size, uint32_t flags)
 {
     pal_mem_t *mem = NULL;
