@@ -78,4 +78,9 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg);
 lb_status_t dram_bw_run(const lb_cfg_t *cfg);
 lb_status_t dram_row_run(const lb_cfg_t *cfg);
 
+/* Topology atomics, false sharing, and ping-pong, implemented in bench_topo.c. */
+lb_status_t topo_atomic_run(const lb_cfg_t *cfg);
+lb_status_t topo_falseshare_run(const lb_cfg_t *cfg);
+lb_status_t topo_pingpong_run(const lb_cfg_t *cfg);
+
 #endif /* LB_BENCH_H */
