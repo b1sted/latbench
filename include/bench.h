@@ -73,4 +73,8 @@ lb_status_t br_hist_run(const lb_cfg_t *cfg);
 lb_status_t br_rsb_run(const lb_cfg_t *cfg);
 lb_status_t br_btb_run(const lb_cfg_t *cfg);
 
+/* Memory bandwidth and DRAM row-buffer subtests, implemented in bench_dram.c. */
+lb_status_t dram_bw_run(const lb_cfg_t *cfg);
+lb_status_t dram_row_run(const lb_cfg_t *cfg);
+
 #endif /* LB_BENCH_H */

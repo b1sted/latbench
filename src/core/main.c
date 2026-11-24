@@ -64,6 +64,11 @@ static const lb_subtest_t BRANCH_SUBTESTS[] = {
     {"btb", "BTB and L1i capacity from indirect-call trampolines", br_btb_run},
 };
 
+static const lb_subtest_t DRAM_SUBTESTS[] = {
+    {"bw", "sequential read, write, and copy bandwidth", dram_bw_run},
+    {"row", "DRAM row-buffer locality versus random page switches", dram_row_run},
+};
+
 static const lb_module_t BENCH_MODULES[] = {
     {"sys", "system calibration and clock diagnostics", SYS_SUBTESTS, LB_ARRAY_SIZE(SYS_SUBTESTS)},
     {"mem", "cache size, line, associativity, and prefetcher probes", MEM_SUBTESTS,
@@ -73,6 +78,8 @@ static const lb_module_t BENCH_MODULES[] = {
      LB_ARRAY_SIZE(CORE_SUBTESTS)},
     {"branch", "branch predictor, RSB, and BTB capacity probes", BRANCH_SUBTESTS,
      LB_ARRAY_SIZE(BRANCH_SUBTESTS)},
+    {"dram", "memory bandwidth and DRAM row-buffer locality", DRAM_SUBTESTS,
+     LB_ARRAY_SIZE(DRAM_SUBTESTS)},
 };
 
 const lb_module_t *lb_bench_modules(size_t *count)
