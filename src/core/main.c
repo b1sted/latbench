@@ -42,7 +42,8 @@
 #define LB_SELFTEST_ILP_MUL UINT64_C(6364136223846793005)
 #define LB_SELFTEST_ILP_ADD UINT64_C(1)
 
-#define HELP_FLAG_FMT "  %-22s %s"
+/* Two leading spaces plus a 22-column label: descriptions start at column 25. */
+#define HELP_LINE_FMT "  %-22s%s"
 
 typedef struct lb_selftest_node_t {
     struct lb_selftest_node_t *next;
@@ -517,6 +518,78 @@ static lb_status_t lb_selftest_run(const lb_cfg_t *cfg)
     return LB_STATUS_OK;
 }
 
+static void help_line(const lb_cfg_t *cfg, const char *label, const char *text)
+{
+    tty_header(cfg, HELP_LINE_FMT, label, text);
+}
+
+static bool module_has_arena(const char *name)
+{
+    return strcmp(name, "sys") == 0 || strcmp(name, "mem") == 0 || strcmp(name, "tlb") == 0 ||
+           strcmp(name, "core") == 0 || strcmp(name, "dram") == 0;
+}
+
+static bool module_has_thp_policy(const char *name)
+{
+    return strcmp(name, "mem") == 0 || strcmp(name, "tlb") == 0 || strcmp(name, "core") == 0 ||
+           strcmp(name, "dram") == 0;
+}
+
+static void module_subtest_summary(const lb_module_t *module, char *out, size_t capacity)
+{
+    size_t used = 0u;
+    size_t i = 0u;
+
+    if (module == NULL || out == NULL || capacity == 0u) {
+        return;
+    }
+
+    out[0] = '\0';
+    for (i = 0u; i < module->subtest_count; i++) {
+        const int written = snprintf(out + used, capacity - used, "%s%s", (i == 0u) ? "" : ", ",
+                                     module->subtests[i].name);
+
+        if (written < 0 || (size_t)written >= capacity - used) {
+            break;
+        }
+        used += (size_t)written;
+    }
+}
+
+static void print_module_options(const lb_cfg_t *cfg, const lb_module_t *module)
+{
+    tty_section(cfg, "Options");
+    help_line(cfg, "--cpu <id>", "pin worker to logical CPU <id>");
+    help_line(cfg, "--batch-ms <ms>", "measurement batch duration (default: 20)");
+    help_line(cfg, "--cool-ms <ms>", "cool-down between batches (default: 0)");
+
+    if (module_has_arena(module->name)) {
+        help_line(cfg, "--max-mem <MiB>", "cap arena size (default: 25% of RAM)");
+    }
+    if (module_has_thp_policy(module->name)) {
+        help_line(cfg, "--no-thp / --thp",
+                  "avoid or allow transparent huge pages (default: no-thp)");
+    }
+    if (strcmp(module->name, "sys") == 0) {
+        help_line(cfg, "--qos <perf|bg>", "request perf or bg QoS");
+        help_line(cfg, "--long", "extend sys throttle duration to 10 seconds");
+    }
+    if (strcmp(module->name, "mem") == 0) {
+        help_line(cfg, "--write", "modify words during mem size walk (dirty write-back)");
+    }
+    if (strcmp(module->name, "topo") == 0) {
+        help_line(cfg, "--mode <mode>", "handoff mode (cas|flag, default flag)");
+    }
+    if (strcmp(module->name, "os") == 0) {
+        help_line(cfg, "--mode <mode>", "context switch mode (thread|proc, default both)");
+    }
+
+    help_line(cfg, "--csv", "emit CSV to stdout; diagnostics to stderr");
+    help_line(cfg, "--no-color", "disable color output");
+    help_line(cfg, "-h, --help", "display this help and exit");
+    help_line(cfg, "-V, --version", "output version information and exit");
+}
+
 static void print_help(const lb_cfg_t *cfg)
 {
     const lb_module_t *modules = NULL;
@@ -525,55 +598,84 @@ static void print_help(const lb_cfg_t *cfg)
 
     modules = lb_bench_modules(&module_count);
 
-    tty_header(cfg, "Usage: latbench <module> <subtest> [OPTIONS]");
-    tty_header(cfg, "       latbench auto [OPTIONS]");
-    tty_header(cfg, "%s", "");
+    tty_section(cfg, "Usage");
+    tty_header(cfg, "  latbench <module> <subtest> [OPTIONS]");
+    tty_header(cfg, "  latbench <module> --help");
+    tty_header(cfg, "  latbench auto [OPTIONS]");
 
-    tty_section(cfg, "Runtime");
-    tty_header(cfg, HELP_FLAG_FMT, "    --cpu <id>", "pin worker to logical CPU <id>");
-    tty_header(cfg, HELP_FLAG_FMT, "    --qos <perf|bg>", "request perf or bg QoS");
-    tty_header(cfg, HELP_FLAG_FMT, "    --max-mem <MiB>", "cap arena size (default: 25% of RAM)");
-    tty_header(cfg, HELP_FLAG_FMT, "    --batch-ms <ms>",
-               "measurement batch duration (default: 20)");
-    tty_header(cfg, HELP_FLAG_FMT, "    --cool-ms <ms>", "cool-down between batches (default: 0)");
-    tty_header(cfg, HELP_FLAG_FMT, "    --no-thp", "avoid transparent huge pages (default)");
-    tty_header(cfg, HELP_FLAG_FMT, "    --thp", "allow transparent huge pages");
-    tty_header(cfg, HELP_FLAG_FMT, "    --long", "extend sys throttle to 10 seconds");
-    tty_header(cfg, HELP_FLAG_FMT, "    --mode <cas|flag|thread|proc>",
-               "topo pingpong handoff (default flag) or os ctx (default both)");
+    tty_section(cfg, "Commands");
+    help_line(cfg, "auto", "run compact full-machine suite and print Passport");
+    help_line(cfg, "selftest", "verify Sattolo, pointer-chase, branch, and ILP at -O2");
 
-    tty_section(cfg, "Output");
-    tty_header(cfg, HELP_FLAG_FMT, "    --csv", "emit CSV to stdout; diagnostics to stderr");
-    tty_header(cfg, HELP_FLAG_FMT, "    --no-color", "disable color output");
-
-    tty_section(cfg, "Memory");
-    tty_header(cfg, HELP_FLAG_FMT, "    --write",
-               "modify words on the mem size walk (dirty write-back)");
-
-    tty_section(cfg, "System");
-    tty_header(cfg, HELP_FLAG_FMT, "-h, --help", "display this help and exit");
-    tty_header(cfg, HELP_FLAG_FMT, "-V, --version", "output version information and exit");
-
-    tty_section(cfg, "Profiles");
-    tty_header(cfg, HELP_FLAG_FMT, "    auto",
-               "compact full-machine probes and a unified Passport card");
-
-    tty_section(cfg, "Diagnostics");
-    tty_header(cfg, HELP_FLAG_FMT, "    selftest",
-               "verify Sattolo, pointer-chase, branch, and core-ILP invariants at -O2");
+    tty_section(cfg, "Options");
+    help_line(cfg, "--cpu <id>", "pin worker to logical CPU <id>");
+    help_line(cfg, "--qos <perf|bg>", "request perf or bg QoS");
+    help_line(cfg, "--max-mem <MiB>", "cap arena size (default: 25% of RAM)");
+    help_line(cfg, "--batch-ms <ms>", "measurement batch duration (default: 20)");
+    help_line(cfg, "--cool-ms <ms>", "cool-down between batches (default: 0)");
+    help_line(cfg, "--no-thp / --thp", "avoid or allow transparent huge pages (default: no-thp)");
+    help_line(cfg, "--write", "modify words during mem size walk (dirty write-back)");
+    help_line(cfg, "--long", "extend sys throttle duration to 10 seconds");
+    help_line(cfg, "--mode <mode>", "handoff/switch mode (cas|flag, thread|proc)");
+    help_line(cfg, "--csv", "emit CSV to stdout; diagnostics to stderr");
+    help_line(cfg, "--no-color", "disable color output");
+    help_line(cfg, "-h, --help", "display this help and exit");
+    help_line(cfg, "-V, --version", "output version information and exit");
 
     tty_section(cfg, "Modules");
     for (i = 0u; i < module_count; i++) {
-        size_t j = 0u;
+        char summary[LB_LINE_MAX] = {0};
 
-        for (j = 0u; j < modules[i].subtest_count; j++) {
-            char label[LB_NAME_MAX] = {0};
-
-            (void)snprintf(label, sizeof(label), "%s %s", modules[i].name,
-                           modules[i].subtests[j].name);
-            tty_header(cfg, HELP_FLAG_FMT, label, modules[i].subtests[j].help);
-        }
+        module_subtest_summary(&modules[i], summary, sizeof(summary));
+        help_line(cfg, modules[i].name, summary);
     }
+}
+
+static void print_module_help(const lb_cfg_t *cfg, const lb_module_t *module)
+{
+    size_t i = 0u;
+
+    if (module == NULL) {
+        return;
+    }
+
+    tty_section(cfg, "Usage");
+    tty_header(cfg, "  latbench %s <subtest> [OPTIONS]", module->name);
+    tty_header(cfg, "  latbench %s --help", module->name);
+
+    tty_section(cfg, "Description");
+    tty_header(cfg, "  %s", module->help);
+
+    tty_section(cfg, "Subtests");
+    for (i = 0u; i < module->subtest_count; i++) {
+        help_line(cfg, module->subtests[i].name, module->subtests[i].help);
+    }
+
+    print_module_options(cfg, module);
+}
+
+static void print_command_help(const lb_cfg_t *cfg, const char *command)
+{
+    const bool is_auto = (strcmp(command, "auto") == 0);
+
+    tty_section(cfg, "Usage");
+    tty_header(cfg, "  latbench %s [OPTIONS]", command);
+
+    tty_section(cfg, "Description");
+    tty_header(cfg, "  %s",
+               is_auto ? "run compact full-machine suite and print Passport"
+                       : "verify Sattolo, pointer-chase, branch, and ILP at -O2");
+
+    tty_section(cfg, "Options");
+    help_line(cfg, "--cpu <id>", "pin worker to logical CPU <id>");
+    help_line(cfg, "--batch-ms <ms>", "measurement batch duration (default: 20)");
+    help_line(cfg, "--cool-ms <ms>", "cool-down between batches (default: 0)");
+    help_line(cfg, "--max-mem <MiB>", "cap arena size (default: 25% of RAM)");
+    help_line(cfg, "--no-thp / --thp", "avoid or allow transparent huge pages (default: no-thp)");
+    help_line(cfg, "--csv", "emit CSV to stdout; diagnostics to stderr");
+    help_line(cfg, "--no-color", "disable color output");
+    help_line(cfg, "-h, --help", "display this help and exit");
+    help_line(cfg, "-V, --version", "output version information and exit");
 }
 
 static void print_help_to_stderr(const lb_cfg_t *cfg)
@@ -582,6 +684,14 @@ static void print_help_to_stderr(const lb_cfg_t *cfg)
 
     err_cfg.csv = true;
     print_help(&err_cfg);
+}
+
+static void print_module_help_to_stderr(const lb_cfg_t *cfg, const lb_module_t *module)
+{
+    lb_cfg_t err_cfg = *cfg;
+
+    err_cfg.csv = true;
+    print_module_help(&err_cfg, module);
 }
 
 static lb_status_t parse_u32_option(const char *option, const char *text, uint32_t *out)
@@ -639,7 +749,7 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
 
         if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
             *show_help = true;
-            return LB_STATUS_OK;
+            break;
         }
         if (strcmp(arg, "-V") == 0 || strcmp(arg, "--version") == 0) {
             *show_version = true;
@@ -788,13 +898,8 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (show_help) {
-        print_help(&cfg);
-        return 0;
-    }
-
     if (module_name == NULL) {
-        if (argc == 1) {
+        if (show_help || argc == 1) {
             print_help(&cfg);
             return 0;
         }
@@ -804,6 +909,10 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(module_name, "selftest") == 0) {
+        if (show_help) {
+            print_command_help(&cfg, "selftest");
+            return 0;
+        }
         if (subtest_name != NULL) {
             tty_err("selftest does not take a subtest");
             print_help_to_stderr(&cfg);
@@ -813,18 +922,16 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(module_name, "auto") == 0) {
+        if (show_help) {
+            print_command_help(&cfg, "auto");
+            return 0;
+        }
         if (subtest_name != NULL) {
             tty_err("auto does not take a subtest");
             print_help_to_stderr(&cfg);
             return 2;
         }
         return (lb_auto_run(&cfg) == LB_STATUS_OK) ? 0 : 1;
-    }
-
-    if (subtest_name == NULL) {
-        tty_err("missing subtest for module '%s'", module_name);
-        print_help_to_stderr(&cfg);
-        return 2;
     }
 
     module = find_module(module_name);
@@ -834,10 +941,15 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    if (show_help || subtest_name == NULL) {
+        print_module_help(&cfg, module);
+        return 0;
+    }
+
     subtest = find_subtest(module, subtest_name);
     if (subtest == NULL) {
         tty_err("unknown subtest '%s' for module '%s'", subtest_name, module_name);
-        print_help_to_stderr(&cfg);
+        print_module_help_to_stderr(&cfg, module);
         return 2;
     }
 
