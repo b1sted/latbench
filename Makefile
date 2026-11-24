@@ -144,7 +144,9 @@ $(TEST_BINDIR)/asan/%: $(LEAKS_OBJDIR)/tests/%.o $(TEST_LINK_LEAKS_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) $(LEAKS_LDFLAGS) $^ $(LDLIBS) -o $@
 
-test: all $(TEST_BINS)
+# `$(BIN)` is the RELEASE_CFLAGS (-O2) build on purpose: the selftest verifies
+# that optimizer transformations did not fold the benchmark loops away.
+test: $(BIN) $(TEST_BINS)
 	@set -e; \
 	for test_bin in $(TEST_BINS); do \
 		echo "RUN $$test_bin"; \
