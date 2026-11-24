@@ -226,6 +226,14 @@ static void test_atomics(void)
                "atomic u64 fetch_add returns the old value");
     check_true(counter == 5u, "atomic u64 fetch_add updates the counter");
     pal_atomic_fence_seq();
+
+    pal_atomic_store_u32_relaxed(&value, 13u);
+    check_true(pal_atomic_load_u32_relaxed(&value) == 13u,
+               "relaxed atomic u32 store/load round-trip");
+    check_true(pal_atomic_cas_u32_relaxed(&value, 13u, 17u),
+               "relaxed atomic u32 CAS succeeds on a match");
+    check_true(pal_atomic_load_u32_relaxed(&value) == 17u,
+               "relaxed atomic u32 CAS commits the new value");
 }
 
 static void test_compiler_primitives(void)
