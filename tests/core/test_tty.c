@@ -11,8 +11,10 @@
 #include "tty.h"
 #include "types.h"
 
-#define TEST_CAPTURE_OUT "build/test_tty_capture.out"
-#define TEST_CAPTURE_CSV "build/test_tty_capture.csv"
+/* Capture files live in the working directory: standalone test binaries are
+ * also run on targets where no build/ tree was copied. */
+#define TEST_CAPTURE_OUT "test_tty_capture.out"
+#define TEST_CAPTURE_CSV "test_tty_capture.csv"
 #define TEST_CAPTURE_SIZE 8192u
 #define TEST_PLOT_WIDTH 80u
 #define TEST_CSV_COLUMNS 8
