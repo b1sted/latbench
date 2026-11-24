@@ -40,8 +40,17 @@
 #define MEM_SIZE_MAX_POINTS 64u
 #define MEM_SIZE_SAMPLES 5u
 
-/* mem line: one access per step-th byte, over a buffer larger than L2. */
-#define MEM_LINE_MAX_BYTES (UINT64_C(32) * UINT64_C(1024) * UINT64_C(1024))
+/* Automatic mem size sweeps stop here so the last point stays in RAM. */
+#define MEM_SIZE_AUTO_MAX_BYTES (UINT64_C(512) * UINT64_C(1024) * UINT64_C(1024))
+
+/*
+ * mem line: two dependent loads per hop over 1 KiB blocks. The block start
+ * holds the stride and the word at block + stride holds the next block, so a
+ * stride below one cache line keeps both loads on the same line while larger
+ * strides force a second line into the dependency chain.
+ */
+#define MEM_LINE_BLOCK_BYTES 1024u
+#define MEM_LINE_MAX_BYTES (UINT64_C(4) * UINT64_C(1024) * UINT64_C(1024))
 #define MEM_LINE_ACCESSES 524288u
 #define MEM_LINE_REPEATS 5u
 
@@ -82,7 +91,7 @@ static const size_t MEM_ASSOC_STRIDES[] = {
 
 static const size_t MEM_ASSOC_COLUMNS[] = {1u, 2u, 4u, 8u, 16u, 32u};
 
-static const size_t MEM_LINE_STEPS[] = {1u, 2u, 4u, 8u, 16u, 32u, 64u, 128u, 256u, 512u};
+static const size_t MEM_LINE_STEPS[] = {8u, 16u, 32u, 64u, 128u, 256u, 512u};
 
 /*
  * Volatile result sink. Every timed loop publishes its checksum here so the
@@ -90,7 +99,7 @@ static const size_t MEM_LINE_STEPS[] = {1u, 2u, 4u, 8u, 16u, 32u, 64u, 128u, 256
  */
 static volatile uint64_t g_mem_sink = 0u;
 
-static size_t mem_arena_cap(const lb_cfg_t *cfg, uint64_t limit_bytes)
+static size_t mem_arena_cap(const lb_cfg_t *cfg, uint64_t limit_bytes, bool reserve_indices)
 {
     uint64_t budget = pal_safe_max_mem_bytes((uint64_t)cfg->max_mem_mb);
 
@@ -98,8 +107,10 @@ static size_t mem_arena_cap(const lb_cfg_t *cfg, uint64_t limit_bytes)
         budget = MEM_FALLBACK_BUDGET_BYTES;
     }
 
-    /* Leave one eighth of the budget for Sattolo index arrays. */
-    budget = (budget / 9u) * 8u;
+    if (reserve_indices) {
+        /* Leave one eighth of the budget for Sattolo index arrays. */
+        budget = (budget / 9u) * 8u;
+    }
     if (budget > limit_bytes) {
         budget = limit_bytes;
     }
@@ -299,7 +310,8 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
 
     mem_apply_runtime(cfg);
 
-    arena_bytes = mem_arena_cap(cfg, UINT64_MAX);
+    arena_bytes =
+        mem_arena_cap(cfg, (cfg->max_mem_mb == 0u) ? MEM_SIZE_AUTO_MAX_BYTES : UINT64_MAX, true);
     arena_bytes = (arena_bytes / MEM_NODE_BYTES) * MEM_NODE_BYTES;
     if (arena_bytes < MEM_SIZE_MIN_BYTES) {
         tty_err("memory budget is too small for mem size");
@@ -376,17 +388,28 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
             size_t next = size + (size / 4u);
 
             if (next < size) {
-                next = arena_bytes;
+                break;
             }
-            if (next > arena_bytes || (points + 1u) >= MEM_SIZE_MAX_POINTS) {
+            if ((points + 1u) >= MEM_SIZE_MAX_POINTS) {
+                break;
+            }
+            if (next >= arena_bytes) {
+                /*
+                 * Only append the arena ceiling when it is close to the regular
+                 * geometric grid. A far ceiling would add a single oversized
+                 * step and skew the detected cache boundaries.
+                 */
+                if ((double)arena_bytes > 1.5 * (double)size) {
+                    break;
+                }
                 next = arena_bytes;
             }
             next = (next / MEM_NODE_BYTES) * MEM_NODE_BYTES;
             if (next <= size) {
-                next = size + MEM_NODE_BYTES;
+                break;
             }
             if (next > arena_bytes) {
-                break;
+                next = arena_bytes;
             }
             size = next;
         }
@@ -398,7 +421,8 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
     if (status != LB_STATUS_OK) {
         goto cleanup;
     }
-    status = tty_plot_series(cfg, series, &steps, MEM_SIZE_LEVELS, LB_ARRAY_SIZE(MEM_SIZE_LEVELS));
+    status =
+        tty_plot_series(cfg, series, &steps, MEM_SIZE_LEVELS, LB_ARRAY_SIZE(MEM_SIZE_LEVELS), 0u);
 
 cleanup:
     stats_series_free(series);
@@ -423,31 +447,70 @@ static inline size_t mem_next_index(size_t index, size_t step, size_t length, bo
     return index;
 }
 
-static PAL_NOINLINE uint64_t mem_line_probe(const uint8_t *buf, size_t length, size_t step,
-                                            size_t accesses)
+static lb_status_t mem_line_build(uint8_t *buf, size_t block_count, size_t stride, size_t *indices,
+                                  uint64_t seed)
 {
-    uint64_t sum = 0u;
-    size_t index = 0u;
+    size_t i = 0u;
+    lb_status_t status = LB_STATUS_INVALID_ARG;
+
+    if (buf == NULL || indices == NULL || block_count < 2u) {
+        return LB_STATUS_INVALID_ARG;
+    }
+    if ((stride < sizeof(uintptr_t)) || ((stride + sizeof(uintptr_t)) > MEM_LINE_BLOCK_BYTES)) {
+        return LB_STATUS_INVALID_ARG;
+    }
+    if ((stride % sizeof(uintptr_t)) != 0u) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    status = util_sattolo_indices(indices, block_count, seed);
+    if (status != LB_STATUS_OK) {
+        return status;
+    }
+
+    for (i = 0u; i < block_count; i++) {
+        uint8_t *const block = buf + (i * (size_t)MEM_LINE_BLOCK_BYTES);
+        const uint8_t *const next = buf + (indices[i] * (size_t)MEM_LINE_BLOCK_BYTES);
+
+        *(uintptr_t *)(void *)block = (uintptr_t)stride;
+        *(uintptr_t *)(void *)(block + stride) = (uintptr_t)next;
+    }
+    return LB_STATUS_OK;
+}
+
+/*
+ * Two dependent loads per hop: the offset at the block start selects the word
+ * that holds the next block address. Both words stay inside one cache line
+ * while stride < cache_line, and the second load moves to a new line once the
+ * stride crosses it.
+ */
+static PAL_NOINLINE uint64_t mem_line_chase(const uint8_t *start, size_t hops)
+{
+    const uint8_t *p = start;
     size_t done = 0u;
 
     PAL_NO_VECTORIZE_LOOP
-    while (done < accesses) {
-        sum += (uint64_t)buf[index];
-        index = mem_next_index(index, step, length, false);
+    while (done < hops) {
+        const uintptr_t off = *(const uintptr_t *)(const void *)p;
+
+        p = (const uint8_t *)(*(const uintptr_t *)(const void *)(p + off));
         done++;
     }
 
     PAL_BARRIER();
-    return sum;
+    g_mem_sink = (uint64_t)(uintptr_t)p;
+    return g_mem_sink;
 }
 
 lb_status_t mem_line_run(const lb_cfg_t *cfg)
 {
     pal_mem_t *arena = NULL;
-    const uint8_t *buf = NULL;
+    uint8_t *buf = NULL;
+    size_t *indices = NULL;
     stats_series_t *series = NULL;
     double samples[MEM_LINE_REPEATS] = {0.0};
     size_t buffer_bytes = 0u;
+    size_t block_count = 0u;
     size_t step_index = 0u;
     uint64_t baseline = 0u;
     lb_status_t status = LB_STATUS_NOMEM;
@@ -458,8 +521,14 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
 
     mem_apply_runtime(cfg);
 
-    buffer_bytes = mem_arena_cap(cfg, MEM_LINE_MAX_BYTES);
+    buffer_bytes = mem_arena_cap(cfg, MEM_LINE_MAX_BYTES, false);
     if (buffer_bytes < MEM_MIN_ARENA_BYTES) {
+        tty_err("memory budget is too small for mem line");
+        return LB_STATUS_NOMEM;
+    }
+    buffer_bytes = (buffer_bytes / MEM_LINE_BLOCK_BYTES) * MEM_LINE_BLOCK_BYTES;
+    block_count = buffer_bytes / MEM_LINE_BLOCK_BYTES;
+    if (block_count < 2u) {
         tty_err("memory budget is too small for mem line");
         return LB_STATUS_NOMEM;
     }
@@ -474,6 +543,11 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
         goto cleanup;
     }
 
+    indices = malloc(block_count * sizeof(*indices));
+    if (indices == NULL) {
+        goto cleanup;
+    }
+
     series = stats_series_create("mem line", LB_ARRAY_SIZE(MEM_LINE_STEPS));
     if (series == NULL) {
         goto cleanup;
@@ -481,9 +555,12 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
 
     {
         char human[LB_NAME_MAX] = {0};
+        char block[LB_NAME_MAX] = {0};
 
         (void)tty_format_bytes((uint64_t)buffer_bytes, human, sizeof(human));
+        (void)tty_format_bytes((uint64_t)MEM_LINE_BLOCK_BYTES, block, sizeof(block));
         tty_kv(cfg, "Buffer", "%s", human);
+        tty_kv(cfg, "Block size", "%s (%zu blocks)", block, block_count);
         tty_kv(cfg, "Accesses / repeats", "%u / %u", MEM_LINE_ACCESSES, MEM_LINE_REPEATS);
     }
 
@@ -491,14 +568,21 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
 
     for (step_index = 0u; step_index < LB_ARRAY_SIZE(MEM_LINE_STEPS); step_index++) {
         const size_t step = MEM_LINE_STEPS[step_index];
+        const uint64_t seed =
+            UINT64_C(0x452821e638d01377) ^ ((uint64_t)step * UINT64_C(0x2545f4914f6cdd1d));
         size_t repeat = 0u;
+
+        status = mem_line_build(buf, block_count, step, indices, seed);
+        if (status != LB_STATUS_OK) {
+            goto cleanup;
+        }
 
         for (repeat = 0u; repeat < MEM_LINE_REPEATS; repeat++) {
             const uint64_t begin = pal_now_ns();
-            const uint64_t sum = mem_line_probe(buf, buffer_bytes, step, MEM_LINE_ACCESSES);
+            const uint64_t sink = mem_line_chase(buf, MEM_LINE_ACCESSES);
             uint64_t end = pal_now_ns();
 
-            g_mem_sink = sum;
+            g_mem_sink = sink;
             if (end <= begin) {
                 end = begin + 1u;
             }
@@ -514,10 +598,11 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
 
     mem_canary_finish(cfg, baseline);
 
-    status = tty_plot_series(cfg, series, NULL, NULL, 0u);
+    status = tty_plot_series(cfg, series, NULL, NULL, 0u, 0u);
 
 cleanup:
     stats_series_free(series);
+    free(indices);
     pal_mem_free(arena);
     return status;
 }
@@ -603,7 +688,7 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
 
     mem_apply_runtime(cfg);
 
-    buffer_bytes = mem_arena_cap(cfg, MEM_ASSOC_MAX_BYTES);
+    buffer_bytes = mem_arena_cap(cfg, MEM_ASSOC_MAX_BYTES, false);
     if (buffer_bytes < MEM_MIN_ARENA_BYTES) {
         tty_err("memory budget is too small for mem assoc");
         return LB_STATUS_NOMEM;
@@ -754,7 +839,7 @@ lb_status_t mem_prefetch_run(const lb_cfg_t *cfg)
 
     mem_apply_runtime(cfg);
 
-    buffer_bytes = mem_arena_cap(cfg, MEM_PREFETCH_MAX_BYTES);
+    buffer_bytes = mem_arena_cap(cfg, MEM_PREFETCH_MAX_BYTES, true);
     if (buffer_bytes < MEM_MIN_ARENA_BYTES) {
         tty_err("memory budget is too small for mem prefetch");
         return LB_STATUS_NOMEM;
