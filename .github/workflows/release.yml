@@ -248,47 +248,24 @@ jobs:
           platforms: arm
 
       - name: Build, smoke test, and package in Termux
+        env:
+          PKG_NAME: latbench
+          BIN_PATH: build/bin/latbench
+          VERSION_FLAG: -V
+          HOMEPAGE: https://github.com/b1sted/latbench
+          DESCRIPTION: Empirical CPU, cache, TLB, DRAM, and OS latency microbenchmarking suite.
+          MAINTAINER: Nikita Mandrykin <pkg@basted.dev>
         run: |
           chmod -R a+rwX .
           docker run --rm \
             --platform ${{ matrix.platform }} \
             --security-opt seccomp:unconfined \
+            -e PKG_NAME -e BIN_PATH -e VERSION_FLAG -e HOMEPAGE \
+            -e DESCRIPTION -e MAINTAINER \
             -v "$PWD:/workspace" \
             -w /workspace \
             "${{ matrix.image }}" \
-            /entrypoint.sh bash -c '
-              set -euo pipefail
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              apt-get install -y clang make
-              VERSION="${1#v}"
-              make CC=clang VERSION="$VERSION"
-              ./build/bin/latbench -V
-              ARCH="$(dpkg --print-architecture)"
-              PKG="latbench-termux_${VERSION}_${ARCH}.deb"
-              PKGROOT="pkgroot"
-              mkdir -p "$PKGROOT/DEBIAN" "$PKGROOT/data/data/com.termux/files/usr/bin"
-              cp build/bin/latbench "$PKGROOT/data/data/com.termux/files/usr/bin/latbench"
-              chmod 0755 "$PKGROOT/data/data/com.termux/files/usr/bin/latbench"
-              printf "%s\n" \
-                "Package: latbench" \
-                "Version: $VERSION" \
-                "Architecture: $ARCH" \
-                "Maintainer: Nikita Mandrykin <pkg@basted.dev>" \
-                "Homepage: https://github.com/b1sted/latbench" \
-                "Section: utils" \
-                "Priority: optional" \
-                "Description: Empirical CPU, cache, TLB, DRAM, and OS latency microbenchmarking suite." \
-                > "$PKGROOT/DEBIAN/control"
-              dpkg-deb --root-owner-group --build "$PKGROOT" "$PKG"
-              test "$(dpkg-deb -f "$PKG" Package)" = "latbench"
-              dpkg -i "$PKG"
-              latbench -V
-              mkdir -p artifact
-              cp "$PKG" artifact/
-              cp build/bin/latbench artifact/latbench
-              chmod -R a+rwX artifact
-            ' _ "${GITHUB_REF_NAME}"
+            /entrypoint.sh bash /workspace/tools/termux-build.sh "${GITHUB_REF_NAME}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
