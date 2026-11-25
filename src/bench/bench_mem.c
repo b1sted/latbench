@@ -42,7 +42,7 @@
 #define MEM_SIZE_SAMPLES 5u
 
 /* Automatic mem size sweeps stop here so the last point stays in RAM. */
-#define MEM_SIZE_AUTO_MAX_BYTES (UINT64_C(512) * UINT64_C(1024) * UINT64_C(1024))
+#define MEM_SIZE_AUTO_MAX_BYTES (UINT64_C(256) * UINT64_C(1024) * UINT64_C(1024))
 
 /*
  * Compact auto mode: a fine 1.25x sweep with a short batch keeps the whole
