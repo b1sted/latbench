@@ -31,6 +31,8 @@
 #define TOPO_FS_DEFAULT_BATCH_MS 20u
 #define TOPO_FS_MIN_BATCH_MS 5u
 #define TOPO_FS_OFFSET_COUNT 9u
+#define TOPO_FS_ATTEMPTS 3u
+#define TOPO_FS_READY_TIMEOUT_MS 5000u
 
 /* topo pingpong: one shared cache line and short best-of-three batches per pair. */
 #define TOPO_PP_SHARED_BYTES 4096u
@@ -57,6 +59,8 @@ static volatile uint64_t g_topo_sink = 0u;
 
 typedef struct topo_fs_ctx_t {
     uint64_t *counter;
+    uint32_t *ready;
+    uint32_t *go;
     uint32_t *stop;
     uint64_t iterations;
     uint64_t elapsed_ns;
@@ -238,8 +242,19 @@ static void topo_fs_worker(void *arg)
     uint64_t start = 0u;
     uint64_t end = 0u;
 
-    if (ctx == NULL || ctx->counter == NULL || ctx->stop == NULL) {
+    if (ctx == NULL || ctx->counter == NULL || ctx->ready == NULL || ctx->go == NULL ||
+        ctx->stop == NULL) {
         return;
+    }
+
+    /*
+     * Publish startup only after the trampoline has pinned this thread and
+     * applied its QoS request. The main thread waits for both workers before
+     * it starts the timed batch, so a delayed spawn cannot eat the window.
+     */
+    (void)pal_atomic_fetch_add_u32(ctx->ready, 1u);
+    while (pal_atomic_load_u32_relaxed(ctx->go) == 0u) {
+        /* spin until the main thread opens the batch */
     }
 
     start = pal_now_ns();
@@ -303,12 +318,65 @@ static uint32_t topo_fs_estimate_line(const double *samples, size_t count)
     return 0u;
 }
 
+/*
+ * Run one false-sharing batch. Both workers must report ready before the
+ * batch timer starts; otherwise a thread that is still waiting for its CPU
+ * slot can burn the whole window and leave the counters at zero.
+ */
+static bool topo_fs_step(topo_fs_ctx_t *ctx_a, topo_fs_ctx_t *ctx_b, uint32_t *ready, uint32_t *go,
+                         uint32_t *stop, uint32_t batch_ms, bool pin, uint32_t cpu_a,
+                         uint32_t cpu_b)
+{
+    const uint64_t timeout_ns = (uint64_t)TOPO_FS_READY_TIMEOUT_MS * UINT64_C(1000000);
+    const uint64_t deadline = pal_now_ns() + timeout_ns;
+    pal_thread_t *thread_a = NULL;
+    pal_thread_t *thread_b = NULL;
+    bool ready_ok = false;
+    bool ok = false;
+
+    pal_atomic_store_u32_relaxed(ready, 0u);
+    pal_atomic_store_u32_relaxed(go, 0u);
+    pal_atomic_store_u32_relaxed(stop, 0u);
+
+    thread_a = pal_thread_spawn(topo_fs_worker, ctx_a, pin ? (int32_t)cpu_a : -1, !pin);
+    thread_b = pal_thread_spawn(topo_fs_worker, ctx_b, pin ? (int32_t)cpu_b : -1, !pin);
+    if (thread_a == NULL || thread_b == NULL) {
+        pal_atomic_store_u32_relaxed(go, 1u);
+        pal_atomic_store_u32_relaxed(stop, 1u);
+        (void)topo_join_thread(&thread_a);
+        (void)topo_join_thread(&thread_b);
+        return false;
+    }
+
+    while (pal_atomic_load_u32_relaxed(ready) < 2u) {
+        if (pal_now_ns() >= deadline) {
+            break;
+        }
+    }
+    ready_ok = pal_atomic_load_u32_relaxed(ready) >= 2u;
+
+    pal_atomic_store_u32_relaxed(go, 1u);
+    if (ready_ok) {
+        pal_sleep_ms(batch_ms);
+    }
+    pal_atomic_store_u32_relaxed(stop, 1u);
+
+    if (!topo_join_thread(&thread_a) || !topo_join_thread(&thread_b)) {
+        return false;
+    }
+
+    ok = ready_ok && ctx_a->iterations > 0u && ctx_b->iterations > 0u;
+    return ok;
+}
+
 lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
 {
     const uint32_t cpu_count = pal_cpu_count();
     pal_mem_t *arena = NULL;
     uint8_t *base = NULL;
     uint32_t stop = 0u;
+    uint32_t ready = 0u;
+    uint32_t go = 0u;
     uint32_t cpu_a = 0u;
     uint32_t cpu_b = 1u;
     uint32_t batch_ms = 0u;
@@ -317,8 +385,6 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
     uint32_t line_bytes = 0u;
     uint64_t baseline = 0u;
     size_t offset_index = 0u;
-    pal_thread_t *thread_a = NULL;
-    pal_thread_t *thread_b = NULL;
     lb_status_t status = LB_STATUS_OK;
 
     if (cfg == NULL) {
@@ -375,34 +441,30 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
         uint64_t *counter_b = (uint64_t *)(void *)(base + offset);
         double ns_a = 0.0;
         double ns_b = 0.0;
-
-        *counter_a = 0u;
-        *counter_b = 0u;
-        pal_atomic_store_u32_relaxed(&stop, 0u);
+        bool step_ok = false;
+        uint32_t attempt = 0u;
 
         ctx_a.counter = counter_a;
+        ctx_a.ready = &ready;
+        ctx_a.go = &go;
         ctx_a.stop = &stop;
         ctx_b.counter = counter_b;
+        ctx_b.ready = &ready;
+        ctx_b.go = &go;
         ctx_b.stop = &stop;
 
-        thread_a = pal_thread_spawn(topo_fs_worker, &ctx_a, pin ? (int32_t)cpu_a : -1, !pin);
-        thread_b = pal_thread_spawn(topo_fs_worker, &ctx_b, pin ? (int32_t)cpu_b : -1, !pin);
-        if (thread_a == NULL || thread_b == NULL) {
-            pal_atomic_store_u32_relaxed(&stop, 1u);
-            (void)topo_join_thread(&thread_a);
-            (void)topo_join_thread(&thread_b);
-            tty_err("cannot spawn the false-sharing workers");
-            status = LB_STATUS_ERROR;
-            goto cleanup;
+        /*
+         * A throttled scheduler can still starve a freshly spawned worker.
+         * Retry the whole handshake a couple of times before giving up.
+         */
+        for (attempt = 0u; attempt < TOPO_FS_ATTEMPTS && !step_ok; attempt++) {
+            *counter_a = 0u;
+            *counter_b = 0u;
+            ctx_a.iterations = 0u;
+            ctx_b.iterations = 0u;
+            step_ok = topo_fs_step(&ctx_a, &ctx_b, &ready, &go, &stop, batch_ms, pin, cpu_a, cpu_b);
         }
-
-        pal_sleep_ms(batch_ms);
-        pal_atomic_store_u32_relaxed(&stop, 1u);
-        if (!topo_join_thread(&thread_a) || !topo_join_thread(&thread_b)) {
-            status = LB_STATUS_ERROR;
-            goto cleanup;
-        }
-        if (ctx_a.iterations == 0u || ctx_b.iterations == 0u) {
+        if (!step_ok) {
             tty_err("false-sharing workers produced no samples");
             status = LB_STATUS_ERROR;
             goto cleanup;
@@ -427,9 +489,8 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
     topo_canary_finish(cfg, baseline);
 
 cleanup:
+    pal_atomic_store_u32_relaxed(&go, 1u);
     pal_atomic_store_u32_relaxed(&stop, 1u);
-    (void)topo_join_thread(&thread_a);
-    (void)topo_join_thread(&thread_b);
     pal_mem_free(arena);
     return status;
 }
