@@ -35,14 +35,17 @@
 #define BR_RSB_ITERATIONS UINT64_C(200000)
 #define BR_RSB_WARMUP UINT64_C(20000)
 #define BR_RSB_REPEATS 3u
-#define BR_RSB_JUMP_PCT 10.0
+#define BR_RSB_JUMP_PCT 15.0
+#define BR_RSB_SUSTAIN_PCT 12.0
+#define BR_RSB_SMALL_DEPTH 16u
 #define BR_RSB_DEPTH_COUNT 9u
 
 /* branch btb: indirect calls through a table of unique trampolines. */
 #define BR_BTB_MAX 1024u
 #define BR_BTB_CALLS UINT64_C(2097152)
 #define BR_BTB_REPEATS 3u
-#define BR_BTB_JUMP_PCT 10.0
+#define BR_BTB_JUMP_PCT 25.0
+#define BR_BTB_SUSTAIN_PCT 20.0
 #define BR_BTB_COUNT_COUNT 7u
 
 /* Compact auto mode: fewer iterations and repeats. */
@@ -366,6 +369,7 @@ static double br_rsb_sample(uint64_t depth, uint64_t iterations)
 
 lb_status_t br_rsb_run(const lb_cfg_t *cfg)
 {
+    double ns_per_call[BR_RSB_DEPTH_COUNT] = {0.0};
     double base_ns = 0.0;
     size_t threshold_index = 0u;
     bool threshold_found = false;
@@ -397,8 +401,6 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
     for (index = 0u; index < BR_RSB_DEPTH_COUNT; index++) {
         const uint64_t depth = BR_RSB_DEPTHS[index];
         double samples[BR_RSB_REPEATS] = {0.0};
-        double ns_per_call = 0.0;
-        double delta_pct = 0.0;
         size_t repeat = 0u;
 
         (void)br_rsb_walk(&g_br_rsb_entry, depth, iterations / 10u);
@@ -406,21 +408,43 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
             samples[repeat] = br_rsb_sample(depth, iterations);
         }
         br_cool(cfg);
+        ns_per_call[index] = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
+    }
 
-        ns_per_call = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
-        if (index == 0u) {
-            base_ns = ns_per_call;
-        } else if (base_ns > 0.0) {
-            delta_pct = ((ns_per_call - base_ns) / base_ns) * 100.0;
+    /*
+     * The shallow depths carry call-entry overhead that can dwarf the RSB miss
+     * on some cores, so the baseline is the cheapest shallow depth rather than
+     * a fixed depth == 4 reading.
+     */
+    base_ns = ns_per_call[0];
+    for (index = 0u; index < BR_RSB_DEPTH_COUNT; index++) {
+        if (BR_RSB_DEPTHS[index] <= BR_RSB_SMALL_DEPTH && ns_per_call[index] < base_ns) {
+            base_ns = ns_per_call[index];
         }
-        if (index > 0u && !threshold_found && delta_pct >= BR_RSB_JUMP_PCT) {
+    }
+
+    for (index = 0u; index < BR_RSB_DEPTH_COUNT; index++) {
+        const uint64_t depth = BR_RSB_DEPTHS[index];
+        double delta_pct = 0.0;
+
+        if (base_ns > 0.0) {
+            delta_pct = ((ns_per_call[index] - base_ns) / base_ns) * 100.0;
+        }
+        /*
+         * A real RSB overflow is persistent: the next depth must stay above the
+         * sustain threshold. A single spike (depth 8 on Cortex-A715) no longer
+         * produces a false ~4-frame capacity.
+         */
+        if (!threshold_found && index > 0u && (index + 1u) < BR_RSB_DEPTH_COUNT &&
+            ns_per_call[index] >= (base_ns * (1.0 + (BR_RSB_JUMP_PCT / 100.0))) &&
+            ns_per_call[index + 1u] >= (base_ns * (1.0 + (BR_RSB_SUSTAIN_PCT / 100.0)))) {
             threshold_found = true;
             threshold_index = index;
         }
 
         tty_header(cfg, "  %7" PRIu64 " %14" PRIu64 " %12.4f %9.1f%%", depth, depth + 1u,
-                   ns_per_call, delta_pct);
-        tty_csv_row(cfg, "branch,rsb,%" PRIu64 ",%.4f,%.2f", depth, ns_per_call, delta_pct);
+                   ns_per_call[index], delta_pct);
+        tty_csv_row(cfg, "branch,rsb,%" PRIu64 ",%.4f,%.2f", depth, ns_per_call[index], delta_pct);
     }
 
     if (threshold_found) {
@@ -616,6 +640,8 @@ static double br_btb_sample(size_t count, uint64_t iterations)
 
 lb_status_t br_btb_run(const lb_cfg_t *cfg)
 {
+    double ns_per_call[BR_BTB_COUNT_COUNT] = {0.0};
+    double delta_pct[BR_BTB_COUNT_COUNT] = {0.0};
     double base_ns = 0.0;
     size_t threshold_index = 0u;
     bool threshold_found = false;
@@ -645,8 +671,6 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
         const size_t count = BR_BTB_COUNTS[index];
         const uint64_t iterations = calls / (uint64_t)count;
         double samples[BR_BTB_REPEATS] = {0.0};
-        double ns_per_call = 0.0;
-        double delta_pct = 0.0;
         size_t repeat = 0u;
 
         (void)br_btb_walk(count, iterations / 8u);
@@ -654,20 +678,35 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
             samples[repeat] = br_btb_sample(count, iterations);
         }
         br_cool(cfg);
+        ns_per_call[index] = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
+    }
 
-        ns_per_call = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
-        if (index == 0u) {
-            base_ns = ns_per_call;
-        } else if (base_ns > 0.0) {
-            delta_pct = ((ns_per_call - base_ns) / base_ns) * 100.0;
-        }
-        if (index > 0u && !threshold_found && delta_pct >= BR_BTB_JUMP_PCT) {
-            threshold_found = true;
-            threshold_index = index;
+    base_ns = ns_per_call[0];
+    for (index = 1u; index < BR_BTB_COUNT_COUNT; index++) {
+        delta_pct[index] =
+            (base_ns > 0.0) ? (((ns_per_call[index] - base_ns) / base_ns) * 100.0) : 0.0;
+    }
+
+    for (index = 0u; index < BR_BTB_COUNT_COUNT; index++) {
+        const size_t count = BR_BTB_COUNTS[index];
+
+        /*
+         * Require a persistent jump: a +11% noise blip must not shrink the
+         * reported BTB/L1i capacity, while a real overflow stays above +20%
+         * on the following count.
+         */
+        if (!threshold_found && index > 0u && delta_pct[index] >= BR_BTB_JUMP_PCT) {
+            const bool sustained = ((index + 1u) >= BR_BTB_COUNT_COUNT) ||
+                                   (delta_pct[index + 1u] >= BR_BTB_SUSTAIN_PCT);
+
+            if (sustained) {
+                threshold_found = true;
+                threshold_index = index;
+            }
         }
 
-        tty_header(cfg, "  %9zu %12.4f %9.1f%%", count, ns_per_call, delta_pct);
-        tty_csv_row(cfg, "branch,btb,%zu,%.4f,%.2f", count, ns_per_call, delta_pct);
+        tty_header(cfg, "  %9zu %12.4f %9.1f%%", count, ns_per_call[index], delta_pct[index]);
+        tty_csv_row(cfg, "branch,btb,%zu,%.4f,%.2f", count, ns_per_call[index], delta_pct[index]);
     }
 
     if (threshold_found) {

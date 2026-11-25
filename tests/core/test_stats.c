@@ -129,6 +129,8 @@ static void test_detect_three_levels(void)
     if (steps.count == 2u) {
         check_true(steps.items[0].x_lower == 32768u && steps.items[0].x_upper == 65536u,
                    "L1/L2 step lands on the 32-64 KiB boundary");
+        check_true(steps.items[0].x == 32768u,
+                   "L1/L2 capacity reports the last lower plateau point");
         check_true(steps.items[0].x >= 32768u && steps.items[0].x <= 65536u,
                    "L1/L2 threshold estimate is inside the boundary interval");
         check_true(approx(steps.items[0].lower_ns, 2.0) && approx(steps.items[0].upper_ns, 8.0),
@@ -137,6 +139,8 @@ static void test_detect_three_levels(void)
 
         check_true(steps.items[1].x_lower == 8388608u && steps.items[1].x_upper == 16777216u,
                    "L2/RAM step lands on the 8-16 MiB boundary");
+        check_true(steps.items[1].x == 8388608u,
+                   "L2/RAM capacity reports the last lower plateau point");
         check_true(steps.items[1].x >= 8388608u && steps.items[1].x <= 16777216u,
                    "L2/RAM threshold estimate is inside the boundary interval");
         check_true(approx(steps.items[1].lower_ns, 8.0) && approx(steps.items[1].upper_ns, 30.0),
@@ -147,10 +151,10 @@ static void test_detect_three_levels(void)
 
 static void test_detect_tlb_edge(void)
 {
-    enum { POINT_COUNT = 7 };
-    const size_t x[POINT_COUNT] = {131072u,  262144u,  524288u, 1048576u,
-                                   2097152u, 4194304u, 8388608u};
-    const double latency[POINT_COUNT] = {0.82, 0.82, 2.23, 2.37, 4.50, 4.48, 6.88};
+    enum { POINT_COUNT = 9 };
+    const size_t x[POINT_COUNT] = {131072u,  262144u,  524288u,   1048576u, 2097152u,
+                                   4194304u, 8388608u, 16777216u, 33554432u};
+    const double latency[POINT_COUNT] = {0.82, 0.82, 2.23, 2.37, 4.50, 4.48, 6.88, 6.88, 6.90};
     stats_steps_t steps = {0};
 
     check_true(stats_detect_steps(x, latency, POINT_COUNT, &steps) == LB_STATUS_OK,
@@ -159,7 +163,8 @@ static void test_detect_tlb_edge(void)
     if (steps.count >= 1u) {
         check_true(steps.items[0].x_lower == 262144u && steps.items[0].x_upper == 524288u,
                    "tlb edge keeps the first 256-512 KiB boundary");
-        check_true(steps.items[0].x == 393216u, "tlb edge estimates the first step near 384 KiB");
+        check_true(steps.items[0].x == 262144u,
+                   "tlb edge reports the last lower plateau page count");
         check_true(steps.items[0].ratio > 2.5, "tlb edge keeps the first sharp 2.7x jump");
     }
     if (steps.count >= 2u) {
@@ -196,6 +201,41 @@ static void test_detect_flat_with_ram(void)
     }
 }
 
+static void test_detect_two_level_dense_grid(void)
+{
+    enum { POINT_COUNT = 30 };
+    const size_t kib[POINT_COUNT] = {
+        1u,  2u,  4u,  8u,   12u,  16u,  20u,  24u,  28u,  32u,  36u,  40u,  48u,  56u,  64u,
+        72u, 80u, 96u, 112u, 128u, 160u, 192u, 224u, 256u, 320u, 384u, 448u, 512u, 640u, 768u,
+    };
+    size_t x[POINT_COUNT] = {0u};
+    double latency[POINT_COUNT] = {0.0};
+    stats_steps_t steps = {0};
+    size_t i = 0u;
+
+    for (i = 0u; i < POINT_COUNT; i++) {
+        x[i] = kib[i] * 1024u;
+        if (kib[i] <= 32u) {
+            latency[i] = 3.0;
+        } else if (kib[i] <= 128u) {
+            latency[i] = 11.0;
+        } else {
+            /* Dense gradual L2-to-RAM tail that used to split into a third level. */
+            latency[i] = 11.0 + (180.0 * (double)(i - 19u) / (double)(POINT_COUNT - 19u));
+        }
+    }
+
+    check_true(stats_detect_steps(x, latency, POINT_COUNT, &steps) == LB_STATUS_OK,
+               "dense two-level detection succeeds");
+    check_true(steps.count == 2u, "dense two-level curve does not split into three levels");
+    if (steps.count >= 1u) {
+        check_true(steps.items[0].x == 32768u, "dense two-level L1 capacity is exactly 32 KiB");
+    }
+    if (steps.count >= 2u) {
+        check_true(steps.items[1].x == 131072u, "dense two-level L2 capacity is exactly 128 KiB");
+    }
+}
+
 static void test_detect_smooth_slope(void)
 {
     enum { POINT_COUNT = 16 };
@@ -217,6 +257,7 @@ static void test_detect_smooth_slope(void)
     if (steps.count == 1u) {
         check_true(steps.items[0].x_lower == x[7] && steps.items[0].x_upper == x[11],
                    "smooth slope spans the whole ramp");
+        check_true(steps.items[0].x == x[7], "smooth slope reports the last pre-ramp point");
         check_true(approx(steps.items[0].lower_ns, 10.0) && approx(steps.items[0].upper_ns, 100.0),
                    "smooth slope keeps the outer plateaus");
         check_true(approx(steps.items[0].ratio, 10.0), "smooth slope ratio covers the ramp");
@@ -329,6 +370,7 @@ static void test_series(void)
     if (steps.count == 1u) {
         check_true(steps.items[0].x_lower == 16384u && steps.items[0].x_upper == 20480u,
                    "series threshold lands between the last quiet and first busy point");
+        check_true(steps.items[0].x == 16384u, "series reports the last quiet point as capacity");
     }
 
     check_true(stats_series_push(NULL, 1u, quiet, 3u) == LB_STATUS_INVALID_ARG,
@@ -404,6 +446,7 @@ int main(void)
     test_detect_three_levels();
     test_detect_tlb_edge();
     test_detect_flat_with_ram();
+    test_detect_two_level_dense_grid();
     test_detect_smooth_slope();
     test_detect_noisy_gradual();
     test_detect_flat_plateau();

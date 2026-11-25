@@ -35,11 +35,24 @@
 /* Smallest arena worth measuring in any subtest. */
 #define MEM_MIN_ARENA_BYTES 4096u
 
-/* mem size: geometric sweep from one page to the safe RAM ceiling. */
-#define MEM_SIZE_START_BYTES 1024u
+/* mem size: hardware-aligned sweep from one page to the safe RAM ceiling. */
 #define MEM_SIZE_MIN_BYTES (2u * (size_t)MEM_NODE_BYTES)
 #define MEM_SIZE_MAX_POINTS 64u
 #define MEM_SIZE_SAMPLES 5u
+
+/*
+ * Hardware-aligned working-set grid in KiB. The small steps resolve the L1d,
+ * L1i, and L2 boundaries of embedded cores, while the MiB steps cover desktop
+ * and mobile last-level caches. A --max-mem above 256 MiB continues in 1.5x
+ * steps past the table.
+ */
+static const size_t MEM_SIZE_GRID_KIB[] = {
+    1u,     2u,     4u,     8u,     12u,    16u,    20u,     24u,     28u,     32u,    36u,
+    40u,    48u,    56u,    64u,    72u,    80u,    96u,     112u,    128u,    160u,   192u,
+    224u,   256u,   320u,   384u,   448u,   512u,   640u,    768u,    896u,    1024u,  1280u,
+    1536u,  2048u,  2560u,  3072u,  4096u,  5120u,  6144u,   8192u,   10240u,  12288u, 16384u,
+    20480u, 24576u, 32768u, 49152u, 65536u, 98304u, 131072u, 196608u, 262144u,
+};
 
 /* Automatic mem size sweeps stop here so the last point stays in RAM. */
 #define MEM_SIZE_AUTO_MAX_BYTES (UINT64_C(256) * UINT64_C(1024) * UINT64_C(1024))
@@ -49,11 +62,11 @@
  * passport run short while still resolving the 32 KiB L1d boundary.
  */
 #define MEM_FAST_MAX_BYTES (UINT64_C(64) * UINT64_C(1024) * UINT64_C(1024))
-#define MEM_FAST_BATCH_MS 5u
-#define MEM_FAST_SAMPLES 3u
+#define MEM_FAST_BATCH_MS 10u
+#define MEM_FAST_SAMPLES 5u
 #define MEM_ASSOC_FAST_MAX_BYTES (UINT64_C(8) * UINT64_C(1024) * UINT64_C(1024))
-#define MEM_ASSOC_FAST_ACCESSES 16384u
-#define MEM_ASSOC_FAST_REPEATS 2u
+#define MEM_ASSOC_FAST_ACCESSES 32768u
+#define MEM_ASSOC_FAST_REPEATS 3u
 #define MEM_PREFETCH_FAST_MAX_BYTES (UINT64_C(8) * UINT64_C(1024) * UINT64_C(1024))
 #define MEM_PREFETCH_FAST_ACCESSES 262144u
 #define MEM_PREFETCH_FAST_REPEATS 2u
@@ -84,8 +97,24 @@
 #define MEM_ASSOC_MAX_BYTES (UINT64_C(128) * UINT64_C(1024) * UINT64_C(1024))
 #define MEM_ASSOC_ACCESSES 65536u
 #define MEM_ASSOC_REPEATS 3u
-#define MEM_ASSOC_RATIO_MIN 1.30
+#define MEM_ASSOC_RATIO_MIN 1.65
+#define MEM_ASSOC_SUSTAIN_RATIO 1.50
 #define MEM_ASSOC_JUMP_MIN_NS 0.25
+
+/*
+ * Below this stride the L1d set index is dominated by the offset inside a
+ * single line, so the knee is not a clean associativity signal. The passport
+ * consensus therefore uses only the larger strides, where the knee settles.
+ */
+#define MEM_ASSOC_CONSENSUS_MIN_STRIDE 8192u
+
+/*
+ * A knee below this jump factor is usually an L1-to-L2 transition on a stride
+ * that aliases out of the L1d, not the associativity limit. Such knees would
+ * otherwise drag the consensus towards a small way count on Intel cores whose
+ * large strides skip a level.
+ */
+#define MEM_ASSOC_CONSENSUS_RATIO_MIN 2.50
 
 /* mem prefetch: sequential, strided, and Sattolo-random line walks. */
 #define MEM_PREFETCH_MAX_BYTES (UINT64_C(32) * UINT64_C(1024) * UINT64_C(1024))
@@ -359,6 +388,43 @@ static double mem_size_sample(mem_node_t *start, uint32_t batch_ms, bool write)
     return (double)(end - begin) / (double)hops;
 }
 
+/*
+ * Return the working-set size of grid point index. Indices past the table are
+ * generated as 1.5x extensions of the last table entry so an explicit
+ * --max-mem above 256 MiB keeps a bounded number of large steps.
+ */
+static bool mem_size_grid_point(size_t index, size_t *bytes)
+{
+    const size_t table_count = LB_ARRAY_SIZE(MEM_SIZE_GRID_KIB);
+    size_t kib = 0u;
+
+    if (bytes == NULL) {
+        return false;
+    }
+    if (index < table_count) {
+        kib = MEM_SIZE_GRID_KIB[index];
+    } else {
+        size_t steps = (index - table_count) + 1u;
+
+        kib = MEM_SIZE_GRID_KIB[table_count - 1u];
+        while (steps > 0u) {
+            const size_t next = kib + (kib / 2u);
+
+            if (next <= kib) {
+                return false;
+            }
+            kib = next;
+            steps--;
+        }
+    }
+
+    if (kib > SIZE_MAX / 1024u) {
+        return false;
+    }
+    *bytes = kib * 1024u;
+    return true;
+}
+
 lb_status_t mem_size_run(const lb_cfg_t *cfg)
 {
     pal_mem_t *arena = NULL;
@@ -373,6 +439,7 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
     size_t arena_bytes = 0u;
     size_t max_nodes = 0u;
     size_t size = 0u;
+    size_t grid_index = 0u;
     size_t points = 0u;
     uint64_t baseline = 0u;
     lb_status_t status = LB_STATUS_NOMEM;
@@ -427,19 +494,29 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
 
     baseline = stats_canary_baseline(MEM_CANARY_MS);
 
-    size = ((size_t)MEM_SIZE_START_BYTES / MEM_NODE_BYTES) * MEM_NODE_BYTES;
-    if (size < MEM_SIZE_MIN_BYTES) {
-        size = MEM_SIZE_MIN_BYTES;
-    }
-    if (size > arena_bytes) {
-        size = arena_bytes;
-    }
-
     for (;;) {
-        const size_t count = size / MEM_NODE_BYTES;
-        const uint64_t seed =
-            UINT64_C(0x9e3779b97f4a7c15) ^ ((uint64_t)count * UINT64_C(0x2545f4914f6cdd1d));
+        size_t grid_size = 0u;
+        size_t count = 0u;
+        uint64_t seed = 0u;
         size_t sample = 0u;
+
+        if (!mem_size_grid_point(grid_index, &grid_size)) {
+            break;
+        }
+        size = grid_size;
+        if (size > arena_bytes) {
+            /*
+             * The arena is smaller than the next hardware step. Measure the
+             * arena itself once so a tiny target still reports a real plateau.
+             */
+            size = arena_bytes;
+        }
+        if (size < MEM_SIZE_MIN_BYTES) {
+            break;
+        }
+
+        count = size / MEM_NODE_BYTES;
+        seed = UINT64_C(0x9e3779b97f4a7c15) ^ ((uint64_t)count * UINT64_C(0x2545f4914f6cdd1d));
 
         status = mem_build_chain(nodes, count, indices, seed);
         if (status != LB_STATUS_OK) {
@@ -460,36 +537,10 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
         if (size >= arena_bytes) {
             break;
         }
-
-        {
-            size_t next = size + (size / 4u);
-
-            if (next < size) {
-                break;
-            }
-            if ((points + 1u) >= MEM_SIZE_MAX_POINTS) {
-                break;
-            }
-            if (next >= arena_bytes) {
-                /*
-                 * Only append the arena ceiling when it is close to the regular
-                 * geometric grid. A far ceiling would add a single oversized
-                 * step and skew the detected cache boundaries.
-                 */
-                if ((double)arena_bytes > 1.5 * (double)size) {
-                    break;
-                }
-                next = arena_bytes;
-            }
-            next = (next / MEM_NODE_BYTES) * MEM_NODE_BYTES;
-            if (next <= size) {
-                break;
-            }
-            if (next > arena_bytes) {
-                next = arena_bytes;
-            }
-            size = next;
+        if ((points + 1u) >= MEM_SIZE_MAX_POINTS) {
+            break;
         }
+        grid_index++;
     }
 
     mem_canary_finish(cfg, baseline);
@@ -688,62 +739,120 @@ cleanup:
     return status;
 }
 
+/*
+ * Find the first sustained exit from the N=1..2 base plateau. The global
+ * next/prev maximum used to lock onto a late L2-to-RAM transition (N=26 on
+ * Cortex-A7), so the knee is now the first N whose latency clears the base by
+ * 1.65x while the following N stays at least 1.50x above the base.
+ */
 static size_t mem_assoc_knee(const double *row, size_t limit, double *ratio_out)
 {
-    size_t best_node = 0u;
-    double best_ratio = 0.0;
+    double base = 0.0;
     size_t column = 0u;
 
     if (ratio_out != NULL) {
         *ratio_out = 0.0;
     }
-    if (row == NULL) {
+    if (row == NULL || limit < 4u) {
         return 0u;
     }
 
-    for (column = 1u; column < limit; column++) {
-        const double lower = row[column - 1u];
+    base = row[0];
+    if (row[1] > base) {
+        base = row[1];
+    }
+    if (!(base > 0.0)) {
+        return 0u;
+    }
+
+    for (column = 2u; (column + 1u) < limit; column++) {
         const double upper = row[column];
-        double ratio = 0.0;
+        const double sustained = row[column + 1u];
 
-        if (!(lower > 0.0) || !(upper > lower)) {
+        if ((upper - base) < MEM_ASSOC_JUMP_MIN_NS) {
             continue;
         }
-        ratio = upper / lower;
-        if (ratio < MEM_ASSOC_RATIO_MIN || (upper - lower) < MEM_ASSOC_JUMP_MIN_NS) {
+        if (upper < (base * MEM_ASSOC_RATIO_MIN)) {
             continue;
         }
-        if (ratio > best_ratio) {
-            best_ratio = ratio;
-            best_node = column + 1u;
+        if (sustained < (base * MEM_ASSOC_SUSTAIN_RATIO)) {
+            continue;
         }
+        if (ratio_out != NULL) {
+            *ratio_out = upper / base;
+        }
+        return column + 1u;
     }
-
-    if (ratio_out != NULL) {
-        *ratio_out = best_ratio;
-    }
-    return best_node;
+    return 0u;
 }
 
+/*
+ * Publish the associativity consensus over the larger strides. The knee is the
+ * first conflicting N, so the last fitting N is knee - 1. A lower median keeps
+ * one noisy stride from moving the passport.
+ */
+static void mem_sort_ways(uint32_t *values, size_t count)
+{
+    size_t i = 0u;
+
+    for (i = 1u; i < count; i++) {
+        const uint32_t value = values[i];
+        size_t j = i;
+
+        while (j > 0u && values[j - 1u] > value) {
+            values[j] = values[j - 1u];
+            j--;
+        }
+        values[j] = value;
+    }
+}
+
+/*
+ * Publish the associativity consensus over the larger strides. The knee is the
+ * first conflicting N, so the last fitting N is knee - 1. Knees with a weak
+ * jump are L1-to-L2 transitions on aliasing strides, not an associativity
+ * limit, so the consensus prefers the convincing knees and falls back to every
+ * valid high-stride knee when too few are strong.
+ */
 static void mem_publish_assoc(double latencies[][MEM_ASSOC_MAX_NODES], const size_t limits[],
                               size_t stride_count)
 {
     lb_passport_t *passport = lb_passport_mutable();
+    uint32_t ways_all[LB_ARRAY_SIZE(MEM_ASSOC_STRIDES)] = {0u};
+    uint32_t ways_strong[LB_ARRAY_SIZE(MEM_ASSOC_STRIDES)] = {0u};
+    size_t all_count = 0u;
+    size_t strong_count = 0u;
     size_t stride_index = 0u;
-    uint32_t best_ways = 0u;
-    double best_ratio = 0.0;
 
     for (stride_index = 0u; stride_index < stride_count; stride_index++) {
         double ratio = 0.0;
-        const size_t ways = mem_assoc_knee(latencies[stride_index], limits[stride_index], &ratio);
+        size_t ways = 0u;
 
-        if (ways > 0u && ratio > best_ratio) {
-            best_ratio = ratio;
-            /* The knee is the first N that conflicts; the last fitting N is the associativity. */
-            best_ways = (ways > 1u) ? (uint32_t)(ways - 1u) : 0u;
+        if (MEM_ASSOC_STRIDES[stride_index] < MEM_ASSOC_CONSENSUS_MIN_STRIDE) {
+            continue;
+        }
+        ways = mem_assoc_knee(latencies[stride_index], limits[stride_index], &ratio);
+        if (ways > 1u && ways <= MEM_ASSOC_MAX_NODES) {
+            const uint32_t last_fitting = (uint32_t)(ways - 1u);
+
+            ways_all[all_count] = last_fitting;
+            all_count++;
+            if (ratio >= MEM_ASSOC_CONSENSUS_RATIO_MIN) {
+                ways_strong[strong_count] = last_fitting;
+                strong_count++;
+            }
         }
     }
-    passport->l1d_ways = best_ways;
+
+    if (strong_count >= 2u) {
+        mem_sort_ways(ways_strong, strong_count);
+        passport->l1d_ways = ways_strong[(strong_count - 1u) / 2u];
+    } else if (all_count > 0u) {
+        mem_sort_ways(ways_all, all_count);
+        passport->l1d_ways = ways_all[(all_count - 1u) / 2u];
+    } else {
+        passport->l1d_ways = 0u;
+    }
 }
 
 static void mem_assoc_table(const lb_cfg_t *cfg, double latencies[][MEM_ASSOC_MAX_NODES],

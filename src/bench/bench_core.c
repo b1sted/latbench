@@ -56,7 +56,9 @@
 #define CORE_STLF_ITERATIONS UINT64_C(5000000)
 #define CORE_STLF_WARMUP UINT64_C(100000)
 #define CORE_STLF_REPEATS 3u
-#define CORE_STLF_CASES 5u
+#define CORE_STLF_CASES 6u
+#define CORE_STLF_STRADDLE_OFFSET 4u
+#define CORE_STLF_MIN_BUFFER_BYTES 8192u
 
 /* Compact auto mode: fewer iterations and repeats; the arena stays above L3. */
 #define CORE_FAST_REPEATS 2u
@@ -86,7 +88,7 @@ static const char *const CORE_ALIGN_NAMES[CORE_ALIGN_CASES] = {
 static const size_t CORE_ALIGN_OFFSETS[CORE_ALIGN_CASES] = {0u, 1u, 4u, 8u, 56u, 60u, 63u, 64u};
 
 static const char *const CORE_STLF_NAMES[CORE_STLF_CASES] = {
-    "8B @ +0", "4B @ +0", "4B @ +1", "1B @ +1", "8B @ page",
+    "8B @ +0", "4B @ +0", "4B @ +1", "1B @ +1", "8B @ +4", "8B @ page",
 };
 
 /*
@@ -910,6 +912,35 @@ static PAL_NOINLINE uint64_t core_stlf_partial4(uint8_t *buf, size_t page_size, 
     return val;
 }
 
+/*
+ * Straddling 8-byte load that starts four bytes into the previous 8-byte store.
+ * Modern Intel can forward the 4B @ +1 case quickly, but a load that crosses
+ * the store's upper half still stalls on Intel, AMD, and ARM64.
+ */
+static PAL_NOINLINE uint64_t core_stlf_straddle8(uint8_t *buf, size_t page_size,
+                                                 uint64_t iterations, size_t offset)
+{
+    volatile size_t v_zero = 0u;
+    volatile size_t v_off = offset + CORE_STLF_STRADDLE_OFFSET;
+    uint8_t *p_wr = buf + v_zero;
+    const uint8_t *p_rd = buf + v_off;
+    uint64_t val = UINT64_C(1);
+    uint64_t loaded = 0u;
+    uint64_t i = 0u;
+
+    (void)page_size;
+    PAL_NO_VECTORIZE_LOOP
+    for (i = 0u; i < iterations; i++) {
+        memcpy(p_wr, &val, sizeof(val));
+        memcpy(&loaded, p_rd, sizeof(loaded));
+        val += loaded;
+    }
+
+    PAL_BARRIER();
+    g_core_sink = val;
+    return val;
+}
+
 static PAL_NOINLINE uint64_t core_stlf_partial1(uint8_t *buf, size_t page_size, uint64_t iterations,
                                                 size_t offset)
 {
@@ -958,7 +989,8 @@ static PAL_NOINLINE uint64_t core_stlf_alias(uint8_t *buf, size_t page_size, uin
 }
 
 static const core_stlf_fn_t CORE_STLF_FNS[CORE_STLF_CASES] = {
-    core_stlf_full, core_stlf_narrow4, core_stlf_partial4, core_stlf_partial1, core_stlf_alias,
+    core_stlf_full,     core_stlf_narrow4,   core_stlf_partial4,
+    core_stlf_partial1, core_stlf_straddle8, core_stlf_alias,
 };
 
 static double core_stlf_sample(core_stlf_fn_t fn, uint8_t *buf, size_t page_size, size_t offset,
@@ -987,6 +1019,8 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
     uint64_t baseline = 0u;
     uint64_t seed = UINT64_C(0x9e3779b97f4a7c15);
     size_t case_index = 0u;
+    double worst_stall_ns = 0.0;
+    const char *worst_name = NULL;
     lb_status_t status = LB_STATUS_NOMEM;
 
     if (cfg == NULL) {
@@ -1009,6 +1043,9 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
     core_apply_runtime(cfg);
 
     arena_bytes = 3u * page_size;
+    if (arena_bytes < (CORE_STLF_MIN_BUFFER_BYTES + page_size)) {
+        arena_bytes = CORE_STLF_MIN_BUFFER_BYTES + page_size;
+    }
     arena = pal_mem_alloc(arena_bytes, core_arena_flags(cfg));
     if (arena == NULL) {
         tty_err("cannot allocate a %zu-byte core stlf buffer", arena_bytes);
@@ -1051,12 +1088,18 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
         core_cool(cfg);
 
         ns_per_op = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
-        if (case_index == 2u) {
-            lb_passport_mutable()->stlf_stall_ns = ns_per_op;
+        if (case_index == 2u || case_index == 4u) {
+            if (ns_per_op > worst_stall_ns) {
+                worst_stall_ns = ns_per_op;
+                worst_name = CORE_STLF_NAMES[case_index];
+            }
         }
         tty_header(cfg, "  %-12s %12.4f", CORE_STLF_NAMES[case_index], ns_per_op);
         tty_csv_row(cfg, "core,stlf,%s,%.4f", CORE_STLF_NAMES[case_index], ns_per_op);
     }
+
+    lb_passport_mutable()->stlf_stall_ns = worst_stall_ns;
+    lb_passport_mutable()->stlf_variant = worst_name;
 
     core_canary_finish(cfg, baseline);
     status = LB_STATUS_OK;
