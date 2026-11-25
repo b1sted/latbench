@@ -1,0 +1,104 @@
+name: Tests and Linters
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit tests (${{ matrix.os }}, ${{ matrix.cc }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: gcc
+          - os: ubuntu-latest
+            cc: clang
+          - os: macos-latest
+            cc: clang
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Build
+        run: make CC=${{ matrix.cc }}
+
+      - name: Run tests and -O2 selftest
+        run: make CC=${{ matrix.cc }} test
+
+  cross-tests:
+    name: Cross self-test (${{ matrix.arch }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            cross: aarch64-linux-gnu
+            qemu: qemu-aarch64
+            pkg: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          - arch: armv7
+            cross: arm-linux-gnueabihf
+            qemu: qemu-arm
+            pkg: gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+          - arch: riscv64
+            cross: riscv64-linux-gnu
+            qemu: qemu-riscv64
+            pkg: gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install cross toolchain and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ${{ matrix.pkg }} qemu-user
+
+      - name: Build
+        run: make CC=${{ matrix.cross }}-gcc
+
+      - name: Run selftest under QEMU
+        run: |
+          QEMU_LD_PREFIX=/usr/${{ matrix.cross }} \
+            ${{ matrix.qemu }} ./build/bin/latbench selftest
+
+  leaks:
+    name: Memory leaks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Run AddressSanitizer and UBSan
+        run: make leaks
+
+  lint:
+    name: Static analysis
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install linters
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18 clang-tidy cppcheck
+
+      - name: Run linters
+        run: make lint CLANG_FORMAT=clang-format-18

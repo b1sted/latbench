@@ -16,7 +16,9 @@
 #include "types.h"
 #include "util.h"
 
+#ifndef LB_VERSION
 #define LB_VERSION "0.1.0"
+#endif
 #define LB_DEFAULT_BATCH_MS 20u
 #define LB_DEFAULT_COOL_MS 0u
 

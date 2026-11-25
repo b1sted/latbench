@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://nfpm.goreleaser.com/static/schema.json
+name: latbench
+arch: "${NFPM_ARCH}"
+platform: linux
+version: "${VERSION}"
+section: utils
+priority: optional
+maintainer: "Nikita Mandrykin <pkg@basted.dev>"
+description: "Empirical CPU, cache, TLB, DRAM, and OS latency microbenchmarking suite"
+homepage: "https://github.com/b1sted/latbench"
+license: "GPL-3.0"
+contents:
+  - src: nfpm_staging/latbench
+    dst: /usr/bin/latbench
+    file_info:
+      mode: 0755
