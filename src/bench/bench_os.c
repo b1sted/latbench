@@ -86,14 +86,17 @@ lb_status_t os_syscall_run(const lb_cfg_t *cfg)
     delta_ns = syscall_ns - timer_ns;
     lb_passport_mutable()->os_syscall_ns = syscall_ns;
 
+    tty_blank(cfg);
     tty_header(cfg, "  %-24s %14s", "Path", "ns/call");
     tty_header(cfg, "  %-24s %14.2f", "vDSO/timer", timer_ns);
     tty_header(cfg, "  %-24s %14.2f", "kernel syscall (write)", syscall_ns);
+    tty_blank(cfg);
     tty_kv(cfg, "Delta", "%.2f ns/call", delta_ns);
     tty_csv_row(cfg, "os,syscall,vdso_timer,%.2f", timer_ns);
     tty_csv_row(cfg, "os,syscall,kernel_write,%.2f", syscall_ns);
     tty_csv_row(cfg, "os,syscall,delta,%.2f", delta_ns);
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, false);
     return LB_STATUS_OK;
 }
@@ -144,6 +147,7 @@ lb_status_t os_ctx_run(const lb_cfg_t *cfg)
     tty_section(cfg, "OS context switch");
     tty_kv(cfg, "Rounds", "%" PRIu32 " per mode", rounds);
     tty_kv(cfg, "Mechanism", "1-byte pipe ping-pong");
+    tty_blank(cfg);
     tty_header(cfg, "  %-10s %12s %14s", "Mode", "Switches", "us/switch");
     baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
@@ -162,6 +166,7 @@ lb_status_t os_ctx_run(const lb_cfg_t *cfg)
         }
     }
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, false);
     return LB_STATUS_OK;
 }
@@ -201,6 +206,7 @@ lb_status_t os_wakeup_run(const lb_cfg_t *cfg)
     tty_kv(cfg, "Latency", "%.3f us/wakeup", us_per_wakeup);
     tty_csv_row(cfg, "os,wakeup,us_per_wakeup,%.3f,us", us_per_wakeup);
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, false);
     return LB_STATUS_OK;
 }
@@ -238,9 +244,11 @@ lb_status_t os_shootdown_run(const lb_cfg_t *cfg)
 
     single_us = ((double)result.single_ns / (double)result.single_ops) / OS_NS_PER_US;
     lb_passport_mutable()->os_shootdown_single_us = single_us;
+    tty_blank(cfg);
     tty_header(cfg, "  %-16s %14.3f us/mprotect", "1 thread", single_us);
     tty_csv_row(cfg, "os,shootdown,single,%.3f", single_us);
 
+    tty_blank(cfg);
     if (result.multi_skipped) {
         tty_kv(cfg, "Multi-thread", "skipped (need at least 2 CPUs)");
         tty_csv_row(cfg, "os,shootdown,multi,skipped");
@@ -258,6 +266,7 @@ lb_status_t os_shootdown_run(const lb_cfg_t *cfg)
         tty_warn("os shootdown: multi-thread probe produced no samples");
     }
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, false);
     return LB_STATUS_OK;
 }
@@ -297,6 +306,7 @@ lb_status_t os_fork_run(const lb_cfg_t *cfg)
     tty_kv(cfg, "Latency", "%.3f us/fork", us_per_fork);
     tty_csv_row(cfg, "os,fork,us_per_fork,%.3f,us", us_per_fork);
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, false);
     return LB_STATUS_OK;
 }
@@ -337,6 +347,7 @@ lb_status_t os_sig_run(const lb_cfg_t *cfg)
     tty_kv(cfg, "Latency", "%.2f ns/signal (%.3f us)", ns_per_signal, us_per_signal);
     tty_csv_row(cfg, "os,sig,ns_per_signal,%.2f,ns", ns_per_signal);
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, false);
     return LB_STATUS_OK;
 }
@@ -395,6 +406,7 @@ lb_status_t os_sleep_run(const lb_cfg_t *cfg)
     tty_csv_row(cfg, "os,sleep,target_us,p10_us,p50_us,p90_us,overshoot_us");
     tty_section(cfg, "OS sleep");
     tty_kv(cfg, "Samples", "%" PRIu32 " per target", samples);
+    tty_blank(cfg);
     tty_header(cfg, "  %10s %12s %12s %12s %12s", "Target", "p10", "p50", "p90", "overshoot");
     baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
@@ -407,6 +419,7 @@ lb_status_t os_sleep_run(const lb_cfg_t *cfg)
         return status;
     }
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, false);
     return LB_STATUS_OK;
 }

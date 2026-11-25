@@ -421,10 +421,12 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
         char human[LB_NAME_MAX] = {0};
 
         (void)tty_format_bytes((uint64_t)arena_bytes, human, sizeof(human));
+        tty_section(cfg, "Cache size");
         tty_kv(cfg, "Walk mode", "%s", cfg->write ? "write (dirty)" : "read-only");
         tty_kv(cfg, "Arena limit", "%s", human);
         tty_kv(cfg, "Batch / samples", "%" PRIu32 " ms / %zu", batch_ms, sample_count);
     }
+    tty_blank(cfg);
 
     baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
@@ -477,15 +479,19 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
         grid_index++;
     }
 
-    lb_bench_canary_finish(cfg, baseline, true);
-
     status = stats_series_detect_steps(series, &steps);
     if (status != LB_STATUS_OK) {
         goto cleanup;
     }
     mem_publish_cache_steps(&steps);
-    status =
-        tty_plot_series(cfg, series, &steps, MEM_SIZE_LEVELS, LB_ARRAY_SIZE(MEM_SIZE_LEVELS), 0u);
+    status = tty_plot_series_ex(cfg, series, &steps, MEM_SIZE_LEVELS,
+                                LB_ARRAY_SIZE(MEM_SIZE_LEVELS), 0u, false);
+    if (status != LB_STATUS_OK) {
+        goto cleanup;
+    }
+    tty_blank(cfg);
+    lb_bench_canary_finish(cfg, baseline, true);
+    status = LB_STATUS_OK;
 
 cleanup:
     stats_series_free(series);
@@ -625,10 +631,12 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
 
         (void)tty_format_bytes((uint64_t)buffer_bytes, human, sizeof(human));
         (void)tty_format_bytes((uint64_t)MEM_LINE_BLOCK_BYTES, block, sizeof(block));
+        tty_section(cfg, "Cache line");
         tty_kv(cfg, "Buffer", "%s", human);
         tty_kv(cfg, "Block size", "%s (%zu blocks)", block, block_count);
         tty_kv(cfg, "Accesses / repeats", "%u / %u", MEM_LINE_ACCESSES, MEM_LINE_REPEATS);
     }
+    tty_blank(cfg);
 
     baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
@@ -662,9 +670,13 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
         }
     }
 
+    status = tty_plot_series_ex(cfg, series, NULL, NULL, 0u, 0u, false);
+    if (status != LB_STATUS_OK) {
+        goto cleanup;
+    }
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, true);
-
-    status = tty_plot_series(cfg, series, NULL, NULL, 0u, 0u);
+    status = LB_STATUS_OK;
 
 cleanup:
     stats_series_free(series);
@@ -794,7 +806,6 @@ static void mem_assoc_table(const lb_cfg_t *cfg, double latencies[][MEM_ASSOC_MA
 {
     size_t stride_index = 0u;
 
-    tty_section(cfg, "Associativity");
     tty_header(cfg, "  %-10s %8s %8s %8s %8s %8s %8s  %s", "Stride", "N=1", "N=2", "N=4", "N=8",
                "N=16", "N=32", "Knee");
 
@@ -884,9 +895,11 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
         char human[LB_NAME_MAX] = {0};
 
         (void)tty_format_bytes((uint64_t)buffer_bytes, human, sizeof(human));
+        tty_section(cfg, "Cache associativity");
         tty_kv(cfg, "Buffer", "%s", human);
         tty_kv(cfg, "Accesses / repeats", "%zu / %zu", accesses, repeats);
     }
+    tty_blank(cfg);
 
     tty_csv_row(cfg, "mem,assoc,stride_bytes,nodes,ns_per_access");
 
@@ -950,9 +963,10 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
         }
     }
 
-    lb_bench_canary_finish(cfg, baseline, true);
     mem_publish_assoc(latencies, limits, stride_count);
     mem_assoc_table(cfg, latencies, limits, stride_count);
+    tty_blank(cfg);
+    lb_bench_canary_finish(cfg, baseline, true);
     status = LB_STATUS_OK;
 
 cleanup:
@@ -1075,9 +1089,11 @@ lb_status_t mem_prefetch_run(const lb_cfg_t *cfg)
         char human[LB_NAME_MAX] = {0};
 
         (void)tty_format_bytes((uint64_t)buffer_bytes, human, sizeof(human));
+        tty_section(cfg, "Prefetcher");
         tty_kv(cfg, "Buffer", "%s", human);
         tty_kv(cfg, "Accesses / repeats", "%zu / %zu", accesses, repeats);
     }
+    tty_blank(cfg);
 
     tty_csv_row(cfg, "mem,prefetch,variant,ns_per_access");
 
@@ -1108,13 +1124,12 @@ lb_status_t mem_prefetch_run(const lb_cfg_t *cfg)
         tty_csv_row(cfg, "mem,prefetch,%s,%.3f", patterns[case_index].name, results[case_index]);
     }
 
-    lb_bench_canary_finish(cfg, baseline, true);
-
-    tty_section(cfg, "Prefetcher");
     tty_header(cfg, "  %-22s %12s", "Pattern", "ns/access");
     for (case_index = 0u; case_index < MEM_PREFETCH_CASES; case_index++) {
         tty_header(cfg, "  %-22s %12.3f", patterns[case_index].name, results[case_index]);
     }
+    tty_blank(cfg);
+    lb_bench_canary_finish(cfg, baseline, true);
     status = LB_STATUS_OK;
 
 cleanup:

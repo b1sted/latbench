@@ -399,6 +399,7 @@ lb_status_t core_ilp_run(const lb_cfg_t *cfg)
     tty_section(cfg, "Instruction-level parallelism");
     tty_kv(cfg, "Iterations / chains", "%" PRIu64 " / 1,2,4,6,8",
            cfg->fast ? CORE_ILP_FAST_ITERATIONS : CORE_ILP_ITERATIONS);
+    tty_blank(cfg);
     tty_header(cfg, "  %-4s %7s %10s %9s", "Type", "Chains", "ns/op", "Speedup");
     tty_csv_row(cfg, "core,ilp,type,chains,ns_per_op,speedup");
 
@@ -409,6 +410,7 @@ lb_status_t core_ilp_run(const lb_cfg_t *cfg)
     core_ilp_table(cfg, "FPU", CORE_ILP_FP_FNS, &passport->fpu_ilp_chains,
                    &passport->fpu_ilp_speedup);
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, true);
     return LB_STATUS_OK;
 }
@@ -559,6 +561,7 @@ lb_status_t core_mlp_run(const lb_cfg_t *cfg)
         tty_kv(cfg, "Chains", "1,2,4,6,8,12,16,24");
         tty_kv(cfg, "Iterations / repeats", "%" PRIu64 " / %zu", iterations, repeats);
     }
+    tty_blank(cfg);
     tty_header(cfg, "  %7s %12s %14s", "Chains", "ns/access", "M accesses/s");
     tty_csv_row(cfg, "core,mlp,chains,ns_per_access,m_accesses_per_s");
 
@@ -601,6 +604,7 @@ lb_status_t core_mlp_run(const lb_cfg_t *cfg)
     }
 
     if (chain_count > 0u && peak > 0.0) {
+        tty_blank(cfg);
         for (chain_index = 1u; chain_index < chain_count; chain_index++) {
             if (throughput[chain_index] <
                 (throughput[chain_index - 1u] * (1.0 + (CORE_MLP_GAIN_MIN_PCT / 100.0)))) {
@@ -621,6 +625,7 @@ lb_status_t core_mlp_run(const lb_cfg_t *cfg)
         }
     }
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, true);
     status = LB_STATUS_OK;
 
@@ -738,6 +743,7 @@ lb_status_t core_align_run(const lb_cfg_t *cfg)
         tty_kv(cfg, "Buffer", "%s", human);
         tty_kv(cfg, "Iterations / repeats", "%" PRIu64 " / %zu", iterations, repeats);
     }
+    tty_blank(cfg);
     tty_header(cfg, "  %-12s %8s %12s", "Offset", "Bytes", "ns/read");
     tty_csv_row(cfg, "core,align,offset,ns_per_read");
 
@@ -760,6 +766,7 @@ lb_status_t core_align_run(const lb_cfg_t *cfg)
         tty_csv_row(cfg, "core,align,%zu,%.4f", offsets[case_index], ns_per_read);
     }
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, true);
     status = LB_STATUS_OK;
 
@@ -1014,6 +1021,7 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
         tty_kv(cfg, "Buffer", "%s", human);
         tty_kv(cfg, "Iterations / repeats", "%" PRIu64 " / %zu", iterations, repeats);
     }
+    tty_blank(cfg);
     tty_header(cfg, "  %-12s %12s", "Variant", "ns/op");
     tty_csv_row(cfg, "core,stlf,variant,ns_per_op");
 
@@ -1045,6 +1053,7 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
     lb_passport_mutable()->stlf_stall_ns = worst_stall_ns;
     lb_passport_mutable()->stlf_variant = worst_name;
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, true);
     status = LB_STATUS_OK;
 

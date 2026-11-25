@@ -277,6 +277,7 @@ lb_status_t sys_throttle_run(const lb_cfg_t *cfg)
     tty_kv(cfg, "Duration", "%" PRIu32 " ms (%" PRIu32 " intervals)",
            intervals * SYS_THROTTLE_INTERVAL_MS, intervals);
     tty_kv(cfg, "Interval", "%u ms", SYS_THROTTLE_INTERVAL_MS);
+    tty_blank(cfg);
     tty_header(cfg, "  %8s %12s %12s", "Elapsed", "ops/us", "% first");
 
     for (index = 0u; index < intervals; index++) {
@@ -301,6 +302,7 @@ lb_status_t sys_throttle_run(const lb_cfg_t *cfg)
                     ops_per_us, pct);
     }
 
+    tty_blank(cfg);
     tty_header(cfg, "  Minimum: %.1f%% (drop %.1f%%), final: %.1f%%", min_pct, 100.0 - min_pct,
                final_pct);
     tty_csv_row(cfg, "sys,throttle,minimum,%.1f,percent", min_pct);
