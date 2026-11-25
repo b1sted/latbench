@@ -24,6 +24,13 @@ void tty_set_no_color(bool no_color);
 /* Print a "Title:" section heading. Blank line between sections. */
 void tty_section(const lb_cfg_t *cfg, const char *title);
 
+/*
+ * Print one blank line to separate a parameter block from its table or a table
+ * from its footer. Suppressed in auto, CSV, and quiet modes so machine-readable
+ * output stays untouched.
+ */
+void tty_blank(const lb_cfg_t *cfg);
+
 /* Print an aligned "key  value" line for the passport or info sections. */
 void tty_kv(const lb_cfg_t *cfg, const char *key, const char *fmt, ...) PAL_PRINTF_FORMAT(3, 4);
 
@@ -49,9 +56,9 @@ void tty_warn(const char *fmt, ...) PAL_PRINTF_FORMAT(1, 2);
 void tty_err(const char *fmt, ...) PAL_PRINTF_FORMAT(1, 2);
 
 /*
- * Warn when a DVFS canary drifts below -10% (real throttling) or above +25%
- * (an extreme upward spike). Moderate positive drift from Turbo headroom is
- * expected and silent, as is any non-finite value.
+ * Warn only when a DVFS canary drifts below -10%, which indicates real
+ * throttling. Positive drift is a Turbo ramp and is reported silently in the
+ * "DVFS drift" line instead. Non-finite values never warn.
  */
 void tty_warn_drift(const lb_cfg_t *cfg, double drift_pct);
 
@@ -70,6 +77,15 @@ void tty_warn_drift(const lb_cfg_t *cfg, double drift_pct);
 lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
                             const stats_steps_t *steps, const char *const *level_names,
                             size_t level_name_count, size_t page_size);
+
+/*
+ * Same renderer as tty_plot_series(), but callers that already printed their
+ * own section heading can pass print_section = false. The series label is still
+ * used for the CSV "test" column.
+ */
+lb_status_t tty_plot_series_ex(const lb_cfg_t *cfg, const stats_series_t *series,
+                               const stats_steps_t *steps, const char *const *level_names,
+                               size_t level_name_count, size_t page_size, bool print_section);
 
 /*
  * Render an N x N CPU-to-CPU latency matrix for "topo pingpong". latency_ns is
