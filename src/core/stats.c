@@ -629,6 +629,14 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
         if (!stats_jump_significant(smoothed[i - 1u], smoothed[i], min_jump)) {
             continue;
         }
+        /*
+         * A step needs at least three points on the upper side. A step that
+         * only appears in the last one or two grid points is a noisy arena
+         * ceiling, not a cache level.
+         */
+        if ((count - i) < 3u) {
+            continue;
+        }
         if (sharp_count > 0u && i == (sharp[sharp_count - 1u] + 1u)) {
             if ((smoothed[i] / smoothed[i - 1u]) >
                 (smoothed[sharp[sharp_count - 1u]] / smoothed[sharp[sharp_count - 1u] - 1u])) {

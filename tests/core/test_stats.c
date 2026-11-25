@@ -151,10 +151,10 @@ static void test_detect_three_levels(void)
 
 static void test_detect_tlb_edge(void)
 {
-    enum { POINT_COUNT = 7 };
-    const size_t x[POINT_COUNT] = {131072u,  262144u,  524288u, 1048576u,
-                                   2097152u, 4194304u, 8388608u};
-    const double latency[POINT_COUNT] = {0.82, 0.82, 2.23, 2.37, 4.50, 4.48, 6.88};
+    enum { POINT_COUNT = 9 };
+    const size_t x[POINT_COUNT] = {131072u,  262144u,  524288u,   1048576u, 2097152u,
+                                   4194304u, 8388608u, 16777216u, 33554432u};
+    const double latency[POINT_COUNT] = {0.82, 0.82, 2.23, 2.37, 4.50, 4.48, 6.88, 6.88, 6.90};
     stats_steps_t steps = {0};
 
     check_true(stats_detect_steps(x, latency, POINT_COUNT, &steps) == LB_STATUS_OK,
