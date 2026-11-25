@@ -236,6 +236,111 @@ static void test_detect_two_level_dense_grid(void)
     }
 }
 
+static void test_detect_dense_close_levels(void)
+{
+    enum { POINT_COUNT = 30 };
+    const size_t kib[POINT_COUNT] = {
+        1u,  2u,  4u,  8u,   12u,  16u,  20u,  24u,  28u,  32u,  36u,  40u,  48u,  56u,  64u,
+        72u, 80u, 96u, 112u, 128u, 160u, 192u, 224u, 256u, 320u, 384u, 448u, 512u, 640u, 768u,
+    };
+    size_t x[POINT_COUNT] = {0u};
+    double latency[POINT_COUNT] = {0.0};
+    stats_steps_t steps = {0};
+    size_t i = 0u;
+
+    for (i = 0u; i < POINT_COUNT; i++) {
+        x[i] = kib[i] * 1024u;
+        if (kib[i] <= 64u) {
+            latency[i] = 3.0;
+        } else if (kib[i] <= 128u) {
+            latency[i] = 11.0;
+        } else {
+            latency[i] = 45.0;
+        }
+    }
+
+    check_true(stats_detect_steps(x, latency, POINT_COUNT, &steps) == LB_STATUS_OK,
+               "dense close-level detection succeeds");
+    check_true(steps.count == 2u, "dense 64 KiB and 128 KiB levels stay separate");
+    if (steps.count >= 1u) {
+        check_true(steps.items[0].x == 65536u, "dense close-level L1d capacity is exactly 64 KiB");
+        check_true(steps.items[0].x_lower == 65536u && steps.items[0].x_upper == 73728u,
+                   "dense close-level first step spans 64-72 KiB");
+    }
+    if (steps.count >= 2u) {
+        check_true(steps.items[1].x == 131072u, "dense close-level L2 capacity is exactly 128 KiB");
+        check_true(steps.items[1].x_lower == 131072u && steps.items[1].x_upper == 163840u,
+                   "dense close-level second step spans 128-160 KiB");
+    }
+}
+
+static void test_detect_tlb_close_levels(void)
+{
+    enum { POINT_COUNT = 20, PAGE_SIZE = 4096 };
+    const size_t pages[POINT_COUNT] = {4u,  6u,  8u,  10u, 12u, 16u,  20u,  24u,  32u,  40u,
+                                       48u, 56u, 64u, 80u, 96u, 128u, 192u, 256u, 384u, 512u};
+    size_t x[POINT_COUNT] = {0u};
+    double latency[POINT_COUNT] = {0.0};
+    stats_steps_t steps = {0};
+    size_t i = 0u;
+
+    for (i = 0u; i < POINT_COUNT; i++) {
+        x[i] = pages[i] * (size_t)PAGE_SIZE;
+        if (pages[i] <= 32u) {
+            latency[i] = 1.0;
+        } else if (pages[i] <= 64u) {
+            latency[i] = 2.5;
+        } else {
+            latency[i] = 8.0;
+        }
+    }
+
+    check_true(stats_detect_steps(x, latency, POINT_COUNT, &steps) == LB_STATUS_OK,
+               "dense TLB close-level detection succeeds");
+    check_true(steps.count == 2u, "dense 32-entry and 64-entry TLB levels stay separate");
+    if (steps.count >= 1u) {
+        check_true(steps.items[0].x == 32u * (size_t)PAGE_SIZE,
+                   "dense TLB L1 dTLB capacity is exactly 32 pages");
+        check_true(steps.items[0].x_lower == 32u * (size_t)PAGE_SIZE &&
+                       steps.items[0].x_upper == 40u * (size_t)PAGE_SIZE,
+                   "dense TLB first step spans 32-40 pages");
+    }
+    if (steps.count >= 2u) {
+        check_true(steps.items[1].x == 64u * (size_t)PAGE_SIZE,
+                   "dense TLB L2 capacity is exactly 64 pages");
+        check_true(steps.items[1].x_lower == 64u * (size_t)PAGE_SIZE &&
+                       steps.items[1].x_upper == 80u * (size_t)PAGE_SIZE,
+                   "dense TLB second step spans 64-80 pages");
+    }
+}
+
+static void test_detect_two_point_edge(void)
+{
+    enum { POINT_COUNT = 7 };
+    const double latency[POINT_COUNT] = {2.0, 2.0, 2.0, 4.0, 10.0, 10.0, 10.0};
+    size_t x[POINT_COUNT] = {0u};
+    stats_steps_t steps = {0};
+    size_t i = 0u;
+
+    for (i = 0u; i < POINT_COUNT; i++) {
+        x[i] = (i + 1u) * 4096u;
+    }
+
+    check_true(stats_detect_steps(x, latency, POINT_COUNT, &steps) == LB_STATUS_OK,
+               "two-point edge detection succeeds");
+    check_true(steps.count == 1u, "two-point edge reports a single step");
+    if (steps.count == 1u) {
+        check_true(steps.items[0].x == x[2],
+                   "two-point edge keeps X_fit on the last lower-plateau point");
+        check_true(steps.items[0].x_lower == x[2],
+                   "two-point edge keeps the lower plateau as the step start");
+        check_true(steps.items[0].x_upper == x[4],
+                   "two-point edge extends the step to the first upper-plateau point");
+        check_true(approx(steps.items[0].lower_ns, 2.0) && approx(steps.items[0].upper_ns, 10.0),
+                   "two-point edge recovers both plateau latencies");
+    }
+}
+
 static void test_detect_smooth_slope(void)
 {
     enum { POINT_COUNT = 16 };
@@ -447,6 +552,9 @@ int main(void)
     test_detect_tlb_edge();
     test_detect_flat_with_ram();
     test_detect_two_level_dense_grid();
+    test_detect_dense_close_levels();
+    test_detect_tlb_close_levels();
+    test_detect_two_point_edge();
     test_detect_smooth_slope();
     test_detect_noisy_gradual();
     test_detect_flat_plateau();
