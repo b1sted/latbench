@@ -50,8 +50,27 @@
 /* Dependent ALU chain iterations between clock reads in the canary. */
 #define STATS_CANARY_CHUNK 4096u
 
-/* Idle canary work used to settle the core before the baseline reading. */
-#define STATS_CANARY_WARMUP_MS 50u
+/*
+ * Adaptive canary warm-up. Each slice is short enough to follow the P-state
+ * ramp, and the loop stops once two consecutive slices agree within three
+ * percent so a laptop or amd_pstate core has reached its working Turbo state
+ * before the baseline is taken.
+ */
+#define STATS_CANARY_WARMUP_MS 25u
+#define STATS_CANARY_WARMUP_MAX_MS 250u
+#define STATS_CANARY_WARMUP_STABLE_PCT 3.0
+
+/*
+ * Some amd_pstate/EPP laptops stay in a low idle P-state for well over a
+ * second even under a continuous ALU load, then jump to their working Turbo
+ * frequency. Pay that platform delay once per process so the first probe is
+ * not measured at the idle clock; later probes settle with the adaptive loop.
+ */
+#define STATS_CANARY_PRIME_MS 1600u
+
+/* Tests and tiny probes only need a single short slice before the baseline. */
+#define STATS_CANARY_SHORT_MS 5u
+#define STATS_CANARY_SHORT_WARMUP_MS 25u
 
 struct stats_point_t {
     size_t x;
@@ -776,9 +795,51 @@ uint64_t stats_canary_measure(uint32_t duration_ms)
     return ops;
 }
 
+static bool g_canary_primed = false;
+
+static bool stats_canary_settled(uint64_t previous, uint64_t current)
+{
+    double earlier = 0.0;
+    double later = 0.0;
+    double difference = 0.0;
+
+    if (previous == 0u || current == 0u) {
+        return false;
+    }
+
+    earlier = (double)previous;
+    later = (double)current;
+    difference = (earlier > later) ? (earlier - later) : (later - earlier);
+    return (difference / earlier) <= (STATS_CANARY_WARMUP_STABLE_PCT / 100.0);
+}
+
 uint64_t stats_canary_baseline(uint32_t duration_ms)
 {
-    (void)stats_canary_measure(STATS_CANARY_WARMUP_MS);
+    uint64_t previous = 0u;
+    uint32_t elapsed_ms = 0u;
+
+    if (duration_ms == 0u) {
+        return 0u;
+    }
+    if (duration_ms <= STATS_CANARY_SHORT_MS) {
+        (void)stats_canary_measure(STATS_CANARY_SHORT_WARMUP_MS);
+        return stats_canary_measure(duration_ms);
+    }
+    if (!g_canary_primed) {
+        (void)stats_canary_measure(STATS_CANARY_PRIME_MS);
+        g_canary_primed = true;
+    }
+
+    while (elapsed_ms < STATS_CANARY_WARMUP_MAX_MS) {
+        const uint64_t current = stats_canary_measure(STATS_CANARY_WARMUP_MS);
+
+        elapsed_ms += STATS_CANARY_WARMUP_MS;
+        if (previous != 0u && stats_canary_settled(previous, current)) {
+            break;
+        }
+        previous = current;
+    }
+
     return stats_canary_measure(duration_ms);
 }
 
