@@ -19,6 +19,7 @@ int main(void)
     cfg.max_mem_mb = 4u;
     cfg.no_thp = true;
     cfg.quiet = true;
+    cfg.suppress_drift_warn = true;
     cfg.os_ctx_mode = LB_OS_CTX_BOTH;
 
     status = lb_auto_run(&cfg);

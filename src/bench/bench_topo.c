@@ -32,10 +32,10 @@
 #define TOPO_FS_MIN_BATCH_MS 5u
 #define TOPO_FS_OFFSET_COUNT 9u
 
-/* topo pingpong: one shared cache line and a short batch per core pair. */
+/* topo pingpong: one shared cache line and short best-of-three batches per pair. */
 #define TOPO_PP_SHARED_BYTES 4096u
-#define TOPO_PP_MATRIX_BATCH_MS 5u
-#define TOPO_PP_DEFAULT_BATCH_MS 20u
+#define TOPO_PP_BATCH_MS 2u
+#define TOPO_PP_BATCH_COUNT 3u
 #define TOPO_PP_MAX_CPUS 64u
 #define TOPO_PP_TIME_CHECK_MASK UINT64_C(0x3f)
 #define TOPO_PP_STOP_SEQ UINT32_MAX
@@ -43,7 +43,6 @@
 /* Compact auto mode: fewer atomics and a small representative CPU subset. */
 #define TOPO_FAST_REPEATS 2u
 #define TOPO_ATOMIC_FAST_ITERATIONS UINT64_C(1000000)
-#define TOPO_PP_FAST_BATCH_MS 2u
 #define TOPO_PP_FAST_MAX_CPUS 8u
 
 static const size_t TOPO_FS_OFFSETS[TOPO_FS_OFFSET_COUNT] = {
@@ -110,7 +109,7 @@ static void topo_canary_finish(const lb_cfg_t *cfg, uint64_t baseline)
     const uint64_t after = stats_canary_measure(TOPO_CANARY_MS);
     const double drift = stats_canary_drift_pct(baseline, after);
 
-    tty_warn_drift(drift);
+    tty_warn_drift(cfg, drift);
     tty_kv(cfg, "DVFS drift", "%+.1f%%", drift);
 }
 
@@ -457,13 +456,14 @@ static void topo_pp_responder(topo_pp_shared_t *shared, bool cas_mode)
     }
 
     for (;;) {
-        uint32_t value = 0u;
+        uint32_t value = pal_atomic_load_u32_relaxed(&shared->flag_a);
 
         /* Bare spin: no PAUSE, YIELD, or sched_yield in the handoff path. */
-        while ((value = pal_atomic_load_u32_relaxed(&shared->flag_a)) != seq) {
+        while (value != seq) {
             if (pal_atomic_load_u32_relaxed(&shared->stop) != 0u) {
                 return;
             }
+            value = pal_atomic_load_u32_relaxed(&shared->flag_a);
         }
         pal_atomic_store_u32_relaxed(&shared->flag_b, seq);
         seq++;
@@ -649,6 +649,38 @@ cleanup:
     return status;
 }
 
+/*
+ * A single batch can be hit by a scheduler timeslice or a DVFS transition and
+ * report a huge outlier. Three short independent batches keep the same total
+ * budget while letting the minimum discard those one-off stalls.
+ */
+static lb_status_t topo_pp_run_pair_best(uint32_t cpu_a, uint32_t cpu_b, bool qos_a, bool qos_b,
+                                         bool cas_mode, bool pin, uint64_t *out_ns)
+{
+    uint64_t best = UINT64_MAX;
+    size_t batch = 0u;
+
+    if (out_ns == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    for (batch = 0u; batch < TOPO_PP_BATCH_COUNT; batch++) {
+        uint64_t sample_ns = 0u;
+        const lb_status_t status = topo_pp_run_pair(cpu_a, cpu_b, qos_a, qos_b, TOPO_PP_BATCH_MS,
+                                                    cas_mode, pin, &sample_ns);
+
+        if (status != LB_STATUS_OK) {
+            return status;
+        }
+        if (sample_ns < best) {
+            best = sample_ns;
+        }
+    }
+
+    *out_ns = best;
+    return LB_STATUS_OK;
+}
+
 static int topo_pp_compare_u64(const void *lhs, const void *rhs)
 {
     const uint64_t a = *(const uint64_t *)lhs;
@@ -688,7 +720,6 @@ static lb_status_t topo_pp_matrix(const lb_cfg_t *cfg, uint32_t cpu_count, bool 
     uint64_t *matrix = NULL;
     uint64_t *pair_ns = NULL;
     size_t count = (size_t)cpu_count;
-    const uint32_t batch_ms = cfg->fast ? TOPO_PP_FAST_BATCH_MS : TOPO_PP_MATRIX_BATCH_MS;
     const size_t max_count = cfg->fast ? (size_t)TOPO_PP_FAST_MAX_CPUS : (size_t)TOPO_PP_MAX_CPUS;
     size_t pairs = 0u;
     size_t pair_index = 0u;
@@ -724,14 +755,14 @@ static lb_status_t topo_pp_matrix(const lb_cfg_t *cfg, uint32_t cpu_count, bool 
     tty_section(cfg, "Topo ping-pong");
     tty_kv(cfg, "Mode", "%s token handoff", cas_mode ? "CAS" : "flag");
     tty_kv(cfg, "CPUs", "%zu", count);
-    tty_kv(cfg, "Pairs", "%zu (%" PRIu32 " ms each)", pairs, batch_ms);
+    tty_kv(cfg, "Pairs", "%zu (best of %u x %u ms)", pairs, TOPO_PP_BATCH_COUNT, TOPO_PP_BATCH_MS);
 
     for (i = 0u; i < count; i++) {
         for (size_t j = i + 1u; j < count; j++) {
             uint64_t one_way_ns = 0u;
 
-            status = topo_pp_run_pair((uint32_t)i, (uint32_t)j, true, true, batch_ms, cas_mode,
-                                      true, &one_way_ns);
+            status = topo_pp_run_pair_best((uint32_t)i, (uint32_t)j, true, true, cas_mode, true,
+                                           &one_way_ns);
             if (status != LB_STATUS_OK) {
                 goto cleanup;
             }
@@ -758,26 +789,21 @@ static lb_status_t topo_pp_mac_pairs(const lb_cfg_t *cfg, bool cas_mode)
     static const char *const TOPO_PP_NAMES[3] = {"P-P", "P-E", "E-E"};
     static const bool TOPO_PP_QOS_A[3] = {true, true, false};
     static const bool TOPO_PP_QOS_B[3] = {true, false, false};
-    uint32_t batch_ms = (cfg->batch_ms > 0u) ? cfg->batch_ms : TOPO_PP_DEFAULT_BATCH_MS;
     uint64_t values[3] = {0u, 0u, 0u};
     size_t value_count = 0u;
     size_t i = 0u;
 
-    if (cfg->fast && batch_ms > TOPO_PP_FAST_BATCH_MS) {
-        batch_ms = TOPO_PP_FAST_BATCH_MS;
-    }
-
     tty_section(cfg, "Topo ping-pong");
     tty_kv(cfg, "Mode", "%s token handoff", cas_mode ? "CAS" : "flag");
     tty_kv(cfg, "QoS", "P = perf, E = efficiency (unpinned)");
-    tty_kv(cfg, "Batch", "%" PRIu32 " ms per pair", batch_ms);
+    tty_kv(cfg, "Batch", "best of %u x %u ms per pair", TOPO_PP_BATCH_COUNT, TOPO_PP_BATCH_MS);
     tty_header(cfg, "  %-6s %16s", "Pair", "one-way ns");
     tty_csv_row(cfg, "topo,pingpong,pair,one_way_ns");
 
     for (i = 0u; i < 3u; i++) {
         uint64_t one_way_ns = 0u;
-        const lb_status_t status = topo_pp_run_pair(0u, 0u, TOPO_PP_QOS_A[i], TOPO_PP_QOS_B[i],
-                                                    batch_ms, cas_mode, false, &one_way_ns);
+        const lb_status_t status = topo_pp_run_pair_best(0u, 0u, TOPO_PP_QOS_A[i], TOPO_PP_QOS_B[i],
+                                                         cas_mode, false, &one_way_ns);
 
         if (status != LB_STATUS_OK) {
             return status;

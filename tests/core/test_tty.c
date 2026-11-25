@@ -303,6 +303,12 @@ static const uint64_t TEST_MATRIX[16] = {
     0u, 12u, 42u, 95u, 11u, 0u, 38u, 88u, 40u, 39u, 0u, 72u, 91u, 86u, 70u, 0u,
 };
 
+static const uint64_t TEST_MATRIX_LARGE[9] = {
+    0u, UINT64_C(15686619), UINT64_C(2000000000), UINT64_C(15686619),
+    0u, UINT64_C(150000),   UINT64_C(2000000000), UINT64_C(150000),
+    0u,
+};
+
 static void test_matrix_table(void)
 {
     lb_cfg_t cfg = {0};
@@ -326,6 +332,29 @@ static void test_matrix_table(void)
         check_true(strstr(output, "95") != NULL, "matrix prints a slow latency");
         check_true(strstr(output, "\x1b") == NULL, "no-color matrix emits no ANSI escapes");
         check_true(lines_fit(output, TEST_PLOT_WIDTH), "matrix stays within 80 columns");
+    }
+}
+
+static void test_matrix_large_cells(void)
+{
+    lb_cfg_t cfg = {0};
+    char output[TEST_CAPTURE_SIZE] = {0};
+
+    cfg.no_color = true;
+    cfg.csv = false;
+    tty_set_no_color(true);
+
+    check_true(capture_start(TEST_CAPTURE_OUT), "large matrix capture starts");
+    if (g_stdout_captured) {
+        check_true(tty_print_matrix(&cfg, "Large outliers", TEST_MATRIX_LARGE, 3u) == LB_STATUS_OK,
+                   "large matrix print succeeds");
+        (void)capture_read(TEST_CAPTURE_OUT, output, sizeof(output));
+
+        check_true(strstr(output, "15.7ms") != NULL, "matrix abbreviates multi-millisecond cells");
+        check_true(strstr(output, "150us") != NULL, "matrix abbreviates sub-millisecond cells");
+        check_true(strstr(output, ">999ms") != NULL, "matrix caps second-scale cells");
+        check_true(strstr(output, "15686619") == NULL, "matrix never prints a raw outlier");
+        check_true(lines_fit(output, TEST_PLOT_WIDTH), "large matrix stays within 80 columns");
     }
 }
 
@@ -362,6 +391,7 @@ int main(void)
     test_plot_pages();
     test_plot_csv();
     test_matrix_table();
+    test_matrix_large_cells();
     test_matrix_csv();
 
     if (g_stdout_captured) {

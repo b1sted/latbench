@@ -40,6 +40,7 @@ typedef struct lb_cfg_t {
     bool fast;                    /* compact probe mode used by "auto" */
     bool auto_mode;               /* internal: collect a passport, hide probe detail */
     bool quiet;                   /* internal: suppress all informational output */
+    bool suppress_drift_warn;     /* internal: big.LITTLE migration makes the canary noisy */
     bool runtime_applied;         /* internal: --cpu/--qos already applied once by "auto" */
     lb_os_ctx_mode_t os_ctx_mode; /* --mode thread|proc: os ctx selection */
 } lb_cfg_t;

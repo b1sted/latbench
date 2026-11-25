@@ -77,7 +77,13 @@ static void os_canary_finish(const lb_cfg_t *cfg, uint64_t baseline)
     const uint64_t after = stats_canary_measure(OS_CANARY_MS);
     const double drift = stats_canary_drift_pct(baseline, after);
 
-    tty_warn_drift(drift);
+    /*
+     * Sleep/wakeup/fork probes deliberately block and reschedule, so big.LITTLE
+     * systems migrate the thread between small and large cores. That migration
+     * moves the canary far more than a DVFS change, and warning about it on
+     * every run is pure noise. Keep the measured drift visible as a key/value
+     * line, but do not emit a [WARN] for these probes.
+     */
     tty_kv(cfg, "DVFS drift", "%+.1f%%", drift);
 }
 

@@ -224,7 +224,7 @@ static void mem_canary_finish(const lb_cfg_t *cfg, uint64_t baseline)
     const uint64_t after = stats_canary_measure(MEM_CANARY_MS);
     const double drift = stats_canary_drift_pct(baseline, after);
 
-    tty_warn_drift(drift);
+    tty_warn_drift(cfg, drift);
     tty_kv(cfg, "DVFS drift", "%+.1f%%", drift);
 }
 
@@ -899,7 +899,6 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
 
                 tty_csv_row(cfg, "mem,assoc,%zu,%zu,%.3f", stride, node_count,
                             latencies[stride_index][node_count - 1u]);
-                status = LB_STATUS_OK;
             }
         }
     }

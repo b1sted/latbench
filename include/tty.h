@@ -42,7 +42,7 @@ void tty_err(const char *fmt, ...) PAL_PRINTF_FORMAT(1, 2);
  * (an extreme upward spike). Moderate positive drift from Turbo headroom is
  * expected and silent, as is any non-finite value.
  */
-void tty_warn_drift(double drift_pct);
+void tty_warn_drift(const lb_cfg_t *cfg, double drift_pct);
 
 /*
  * Render one working-set latency series as a compact table plus an ASCII bar.

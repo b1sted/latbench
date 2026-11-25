@@ -1,6 +1,7 @@
 ---
 Checks: >
   bugprone-*,
+  -bugprone-casting-through-void,
   -bugprone-easily-swappable-parameters,
   google-runtime-int,
   readability-identifier-naming

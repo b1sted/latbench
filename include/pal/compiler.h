@@ -10,11 +10,36 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/*
+ * Unaligned alias types for hardware probes that intentionally cross an
+ * alignment boundary. GCC and Clang accept the attribute; other compilers
+ * fall back to the plain fixed-width type.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+typedef uint64_t pal_unaligned_u64_t __attribute__((aligned(1), may_alias));
+typedef uint32_t pal_unaligned_u32_t __attribute__((aligned(1), may_alias));
+typedef uint8_t pal_unaligned_u8_t __attribute__((aligned(1), may_alias));
+#else
+typedef uint64_t pal_unaligned_u64_t;
+typedef uint32_t pal_unaligned_u32_t;
+typedef uint8_t pal_unaligned_u8_t;
+#endif
+
 /* Prevent the compiler from inlining a helper into a timed benchmark loop. */
 #if defined(__GNUC__) || defined(__clang__)
 #define PAL_NOINLINE __attribute__((noinline))
 #else
 #define PAL_NOINLINE
+#endif
+
+/*
+ * Force a tiny helper inline even when the caller is marked with an
+ * optimization-disabling attribute such as Clang's optnone.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#define PAL_ALWAYS_INLINE __attribute__((always_inline)) inline
+#else
+#define PAL_ALWAYS_INLINE inline
 #endif
 
 /*
@@ -33,12 +58,21 @@
  * Force a real basic-block edge. This stops the optimizer from turning a
  * short if/else into a conditional move (cmov/csel) that has different
  * latency characteristics than the branch being measured.
+ *
+ * The two branch-specific variants carry distinct marker strings on purpose:
+ * LLVM SimplifyCFG merges identical empty barriers and then if-converts the
+ * whole if/else into a cmov. Different asm text keeps the taken and not-taken
+ * blocks distinct, so both Clang and GCC emit a real conditional branch.
  */
 #if defined(__GNUC__) || defined(__clang__)
 #define PAL_BLOCK_IFCONV() __asm__ volatile("" ::: "memory")
+#define PAL_BLOCK_IFCONV_T() __asm__ volatile("/* br_t */")
+#define PAL_BLOCK_IFCONV_F() __asm__ volatile("/* br_f */")
 #define PAL_BARRIER() __asm__ volatile("" ::: "memory")
 #else
 #define PAL_BLOCK_IFCONV() ((void)0)
+#define PAL_BLOCK_IFCONV_T() ((void)0)
+#define PAL_BLOCK_IFCONV_F() ((void)0)
 #define PAL_BARRIER() ((void)0)
 #endif
 

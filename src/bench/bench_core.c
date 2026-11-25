@@ -68,7 +68,7 @@
 typedef uint64_t (*core_ilp_fn_t)(uint64_t iterations);
 
 typedef uint64_t (*core_stlf_fn_t)(uint8_t *buf, size_t page_size, uint64_t iterations,
-                                   uint64_t mask);
+                                   size_t offset);
 
 typedef struct core_node_t {
     struct core_node_t *next;
@@ -160,7 +160,7 @@ static void core_canary_finish(const lb_cfg_t *cfg, uint64_t baseline)
     const uint64_t after = stats_canary_measure(CORE_CANARY_MS);
     const double drift = stats_canary_drift_pct(baseline, after);
 
-    tty_warn_drift(drift);
+    tty_warn_drift(cfg, drift);
     tty_kv(cfg, "DVFS drift", "%+.1f%%", drift);
 }
 
@@ -824,22 +824,50 @@ cleanup:
 
 /* --------------------------------------------------------------- core stlf */
 
-static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_stlf_full(uint8_t *buf, size_t page_size,
-                                                             uint64_t iterations, uint64_t mask)
+/*
+ * The store and the dependent load must reach the hardware as real memory
+ * operations. Volatile accesses keep both in the instruction stream without a
+ * compiler barrier between them: a barrier forces Clang to spill the loop
+ * state and the loaded value to the stack, which adds stack store-forwarding
+ * traffic and hides the very store-buffer path this probe measures.
+ *
+ * The offset is loaded once from a volatile zero outside the timed loop, so
+ * the compiler cannot fold the address to a constant while the CPU sees a
+ * stable address. The only loop-carried dependency is the value loaded by one
+ * iteration feeding the store of the next one, not an address-generation chain
+ * that would dominate the store-to-load latency.
+ */
+static PAL_ALWAYS_INLINE void core_stlf_store64(uint8_t *buf, size_t offset, uint64_t value)
+{
+    *(volatile pal_unaligned_u64_t *)(void *)(buf + offset) = value;
+}
+
+static PAL_ALWAYS_INLINE uint64_t core_stlf_load64(const uint8_t *buf, size_t offset)
+{
+    return *(const volatile pal_unaligned_u64_t *)(const void *)(buf + offset);
+}
+
+static PAL_ALWAYS_INLINE uint32_t core_stlf_load32(const uint8_t *buf, size_t offset)
+{
+    return *(const volatile pal_unaligned_u32_t *)(const void *)(buf + offset);
+}
+
+static PAL_ALWAYS_INLINE uint8_t core_stlf_load8(const uint8_t *buf, size_t offset)
+{
+    return *(const volatile pal_unaligned_u8_t *)(const void *)(buf + offset);
+}
+
+static PAL_NOINLINE uint64_t core_stlf_full(uint8_t *buf, size_t page_size, uint64_t iterations,
+                                            size_t offset)
 {
     uint64_t acc = UINT64_C(1);
-    uint64_t val = 0u;
     uint64_t i = 0u;
 
     (void)page_size;
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
-        const size_t delta = (size_t)(acc & mask);
-        const uint64_t store = acc;
-
-        memcpy(buf + delta, &store, sizeof(store));
-        PAL_BARRIER();
-        memcpy(&val, buf + delta, sizeof(val));
-        acc += val;
+        core_stlf_store64(buf, offset, acc);
+        acc += core_stlf_load64(buf, offset);
         PAL_KEEP_INT(acc);
     }
 
@@ -848,22 +876,17 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_stlf_full(uint8_t *buf, size_
     return acc;
 }
 
-static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_stlf_narrow4(uint8_t *buf, size_t page_size,
-                                                                uint64_t iterations, uint64_t mask)
+static PAL_NOINLINE uint64_t core_stlf_narrow4(uint8_t *buf, size_t page_size, uint64_t iterations,
+                                               size_t offset)
 {
     uint64_t acc = UINT64_C(1);
-    uint32_t val = 0u;
     uint64_t i = 0u;
 
     (void)page_size;
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
-        const size_t delta = (size_t)(acc & mask);
-        const uint64_t store = acc;
-
-        memcpy(buf + delta, &store, sizeof(store));
-        PAL_BARRIER();
-        memcpy(&val, buf + delta, sizeof(val));
-        acc += (uint64_t)val;
+        core_stlf_store64(buf, offset, acc);
+        acc += (uint64_t)core_stlf_load32(buf, offset);
         PAL_KEEP_INT(acc);
     }
 
@@ -872,22 +895,17 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_stlf_narrow4(uint8_t *buf, si
     return acc;
 }
 
-static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_stlf_partial4(uint8_t *buf, size_t page_size,
-                                                                 uint64_t iterations, uint64_t mask)
+static PAL_NOINLINE uint64_t core_stlf_partial4(uint8_t *buf, size_t page_size, uint64_t iterations,
+                                                size_t offset)
 {
     uint64_t acc = UINT64_C(1);
-    uint32_t val = 0u;
     uint64_t i = 0u;
 
     (void)page_size;
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
-        const size_t delta = (size_t)(acc & mask);
-        const uint64_t store = acc;
-
-        memcpy(buf + delta, &store, sizeof(store));
-        PAL_BARRIER();
-        memcpy(&val, buf + delta + 1u, sizeof(val));
-        acc += (uint64_t)val;
+        core_stlf_store64(buf, offset, acc);
+        acc += (uint64_t)core_stlf_load32(buf, offset + 1u);
         PAL_KEEP_INT(acc);
     }
 
@@ -896,22 +914,17 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_stlf_partial4(uint8_t *buf, s
     return acc;
 }
 
-static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_stlf_partial1(uint8_t *buf, size_t page_size,
-                                                                 uint64_t iterations, uint64_t mask)
+static PAL_NOINLINE uint64_t core_stlf_partial1(uint8_t *buf, size_t page_size, uint64_t iterations,
+                                                size_t offset)
 {
     uint64_t acc = UINT64_C(1);
-    uint8_t val = 0u;
     uint64_t i = 0u;
 
     (void)page_size;
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
-        const size_t delta = (size_t)(acc & mask);
-        const uint64_t store = acc;
-
-        memcpy(buf + delta, &store, sizeof(store));
-        PAL_BARRIER();
-        memcpy(&val, buf + delta + 1u, sizeof(val));
-        acc += (uint64_t)val;
+        core_stlf_store64(buf, offset, acc);
+        acc += (uint64_t)core_stlf_load8(buf, offset + 1u);
         PAL_KEEP_INT(acc);
     }
 
@@ -920,21 +933,16 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_stlf_partial1(uint8_t *buf, s
     return acc;
 }
 
-static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_stlf_alias(uint8_t *buf, size_t page_size,
-                                                              uint64_t iterations, uint64_t mask)
+static PAL_NOINLINE uint64_t core_stlf_alias(uint8_t *buf, size_t page_size, uint64_t iterations,
+                                             size_t offset)
 {
     uint64_t acc = UINT64_C(1);
-    uint64_t val = 0u;
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
-        const size_t delta = (size_t)(acc & mask);
-        const uint64_t store = acc;
-
-        memcpy(buf + delta, &store, sizeof(store));
-        PAL_BARRIER();
-        memcpy(&val, buf + page_size + delta, sizeof(val));
-        acc += val;
+        core_stlf_store64(buf, offset, acc);
+        acc += core_stlf_load64(buf, page_size + offset);
         PAL_KEEP_INT(acc);
     }
 
@@ -947,11 +955,11 @@ static const core_stlf_fn_t CORE_STLF_FNS[CORE_STLF_CASES] = {
     core_stlf_full, core_stlf_narrow4, core_stlf_partial4, core_stlf_partial1, core_stlf_alias,
 };
 
-static double core_stlf_sample(core_stlf_fn_t fn, uint8_t *buf, size_t page_size, uint64_t mask,
+static double core_stlf_sample(core_stlf_fn_t fn, uint8_t *buf, size_t page_size, size_t offset,
                                uint64_t iterations)
 {
     const uint64_t begin = pal_now_ns();
-    const uint64_t sink = fn(buf, page_size, iterations, mask);
+    const uint64_t sink = fn(buf, page_size, iterations, offset);
     uint64_t end = pal_now_ns();
 
     g_core_sink = sink;
@@ -967,7 +975,7 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
     uint8_t *base = NULL;
     size_t page_size = 0u;
     size_t arena_bytes = 0u;
-    uint64_t mask = 0u;
+    size_t offset = 0u;
     uint64_t iterations = 0u;
     size_t repeats = 0u;
     uint64_t baseline = 0u;
@@ -1008,7 +1016,7 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
     /* The aliasing probe reads this line while the store targets offset zero. */
     memcpy(base + page_size, &seed, sizeof(seed));
 
-    mask = g_core_zero_mask;
+    offset = (size_t)g_core_zero_mask;
 
     {
         char human[LB_NAME_MAX] = {0};
@@ -1029,10 +1037,10 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
         double ns_per_op = 0.0;
         size_t repeat = 0u;
 
-        (void)CORE_STLF_FNS[case_index](base, page_size, iterations / 20u, mask);
+        (void)CORE_STLF_FNS[case_index](base, page_size, iterations / 20u, offset);
         for (repeat = 0u; repeat < repeats; repeat++) {
             samples[repeat] =
-                core_stlf_sample(CORE_STLF_FNS[case_index], base, page_size, mask, iterations);
+                core_stlf_sample(CORE_STLF_FNS[case_index], base, page_size, offset, iterations);
         }
         core_cool(cfg);
 
