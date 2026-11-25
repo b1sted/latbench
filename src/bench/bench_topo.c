@@ -285,9 +285,19 @@ static uint32_t topo_fs_estimate_line(const double *samples, size_t count)
         return 0u;
     }
 
+    /*
+     * A 32-byte line is legitimate on some cores (and under emulation). Skip
+     * the sub-line offsets and report the first plateau at or above 32 bytes.
+     */
     for (i = 0u; i < count; i++) {
-        if (TOPO_FS_OFFSETS[i] >= 64u && samples[i] <= best * 1.15) {
-            return (TOPO_FS_OFFSETS[i] <= 64u) ? 64u : 128u;
+        if (TOPO_FS_OFFSETS[i] >= 32u && samples[i] <= best * 1.15) {
+            if (TOPO_FS_OFFSETS[i] <= 32u) {
+                return 32u;
+            }
+            if (TOPO_FS_OFFSETS[i] <= 64u) {
+                return 64u;
+            }
+            return 128u;
         }
     }
     return 0u;
