@@ -27,8 +27,19 @@ void tty_section(const lb_cfg_t *cfg, const char *title);
 /* Print an aligned "key  value" line for the passport or info sections. */
 void tty_kv(const lb_cfg_t *cfg, const char *key, const char *fmt, ...) PAL_PRINTF_FORMAT(3, 4);
 
-/* Emit one CSV record to stdout. No output is produced outside CSV mode. */
+/*
+ * Emit one CSV record to stdout. No output is produced outside CSV mode.
+ * Auto mode suppresses probe records because the final passport table is the
+ * only CSV schema that belongs on stdout for an "auto --csv" run.
+ */
 void tty_csv_row(const lb_cfg_t *cfg, const char *fmt, ...) PAL_PRINTF_FORMAT(2, 3);
+
+/*
+ * Forget the one-shot CSV headers emitted by tty_plot_series() and
+ * tty_print_matrix(). Tests and callers that start an independent CSV stream
+ * use this so the next render begins with a fresh header.
+ */
+void tty_reset_csv_headers(void);
 
 /* Progress line. Goes to stderr in CSV mode and to stdout otherwise. */
 void tty_progress(const lb_cfg_t *cfg, const char *fmt, ...) PAL_PRINTF_FORMAT(2, 3);

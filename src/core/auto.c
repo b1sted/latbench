@@ -332,7 +332,15 @@ lb_status_t lb_auto_run(const lb_cfg_t *cfg)
                  LB_ARRAY_SIZE(AUTO_PROBES), (double)(end - begin) / 1.0e9, failures);
 
     if (cfg->csv) {
-        auto_publish_csv(&run, passport);
+        /*
+         * Probe CSV rows are suppressed while auto_mode is set. Render the
+         * final passport through a copy that clears it so the only records on
+         * stdout are the unified module,subtest,metric,value,unit table.
+         */
+        render = *cfg;
+        render.csv = cfg->csv;
+        render.auto_mode = false;
+        auto_publish_csv(&render, passport);
     } else if (!cfg->quiet) {
         render = *cfg;
         render.csv = false;

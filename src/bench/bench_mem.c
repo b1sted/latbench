@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "bench_common.h"
 #include "defs.h"
 #include "pal/compiler.h"
 #include "pal/pal.h"
@@ -25,12 +26,6 @@
 /* Pointer hops between clock reads in the timed chase loops. */
 #define MEM_CHASE_CHUNK 64u
 #define MEM_CHASE_UNROLL 8u
-
-/* Duration of each DVFS frequency-drift canary measurement. */
-#define MEM_CANARY_MS 20u
-
-/* Arena policy when the platform cannot report the amount of physical RAM. */
-#define MEM_FALLBACK_BUDGET_BYTES (UINT64_C(4) * UINT64_C(1024) * UINT64_C(1024))
 
 /* Smallest arena worth measuring in any subtest. */
 #define MEM_MIN_ARENA_BYTES 4096u
@@ -159,60 +154,6 @@ static const size_t MEM_LINE_STEPS[] = {8u, 16u, 32u, 64u, 128u, 256u};
  */
 static volatile uint64_t g_mem_sink = 0u;
 
-static size_t mem_arena_cap(const lb_cfg_t *cfg, uint64_t limit_bytes, bool reserve_indices)
-{
-    uint64_t budget = pal_safe_max_mem_bytes((uint64_t)cfg->max_mem_mb);
-
-    if (budget == 0u) {
-        budget = MEM_FALLBACK_BUDGET_BYTES;
-    }
-
-    if (reserve_indices) {
-        /* Leave one eighth of the budget for Sattolo index arrays. */
-        budget = (budget / 9u) * 8u;
-    }
-    if (budget > limit_bytes) {
-        budget = limit_bytes;
-    }
-#if SIZE_MAX < UINT64_MAX
-    if (budget > (uint64_t)SIZE_MAX) {
-        budget = (uint64_t)SIZE_MAX;
-    }
-#endif
-    return (size_t)budget;
-}
-
-static uint32_t mem_arena_flags(const lb_cfg_t *cfg)
-{
-    return cfg->no_thp ? PAL_MEM_NO_THP : PAL_MEM_THP;
-}
-
-static void mem_apply_runtime(const lb_cfg_t *cfg)
-{
-    if (cfg->runtime_applied) {
-        return;
-    }
-
-    if (cfg->cpu_id >= 0) {
-        if (pal_pin_cpu(cfg->cpu_id) != LB_STATUS_OK) {
-            tty_warn("CPU pinning to %" PRId32 " was not applied", cfg->cpu_id);
-        }
-    }
-
-    if (cfg->qos_set) {
-        if (pal_set_qos(cfg->qos_perf) != LB_STATUS_OK) {
-            tty_warn("QoS request '%s' was not applied", cfg->qos_perf ? "perf" : "bg");
-        }
-    }
-}
-
-static void mem_cool(const lb_cfg_t *cfg)
-{
-    if (cfg->cool_ms > 0u) {
-        pal_sleep_ms(cfg->cool_ms);
-    }
-}
-
 static uint32_t mem_batch_ms(const lb_cfg_t *cfg)
 {
     uint32_t batch = 0u;
@@ -246,15 +187,6 @@ static void mem_publish_cache_steps(const stats_steps_t *steps)
     if (steps->count > 2u) {
         passport->l3_bytes = (uint64_t)steps->items[2].x;
     }
-}
-
-static void mem_canary_finish(const lb_cfg_t *cfg, uint64_t baseline)
-{
-    const uint64_t after = stats_canary_measure(MEM_CANARY_MS);
-    const double drift = stats_canary_drift_pct(baseline, after);
-
-    tty_warn_drift(cfg, drift);
-    tty_kv(cfg, "DVFS drift", "%+.1f%%", drift);
 }
 
 static lb_status_t mem_build_chain(mem_node_t *nodes, size_t count, size_t *indices, uint64_t seed)
@@ -453,9 +385,9 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
     size_limit = cfg->fast ? MEM_FAST_MAX_BYTES
                            : ((cfg->max_mem_mb == 0u) ? MEM_SIZE_AUTO_MAX_BYTES : UINT64_MAX);
 
-    mem_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
-    arena_bytes = mem_arena_cap(cfg, size_limit, true);
+    arena_bytes = lb_bench_arena_cap(cfg, size_limit, true);
     arena_bytes = (arena_bytes / MEM_NODE_BYTES) * MEM_NODE_BYTES;
     if (arena_bytes < MEM_SIZE_MIN_BYTES) {
         tty_err("memory budget is too small for mem size");
@@ -463,7 +395,7 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
     }
     max_nodes = arena_bytes / MEM_NODE_BYTES;
 
-    arena = pal_mem_alloc(arena_bytes, mem_arena_flags(cfg));
+    arena = pal_mem_alloc(arena_bytes, lb_bench_arena_flags(cfg));
     if (arena == NULL) {
         tty_err("cannot allocate a %zu-byte mem size arena", arena_bytes);
         goto cleanup;
@@ -492,7 +424,7 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
         tty_kv(cfg, "Batch / samples", "%" PRIu32 " ms / %zu", batch_ms, sample_count);
     }
 
-    baseline = stats_canary_baseline(MEM_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     for (;;) {
         size_t grid_size = 0u;
@@ -526,7 +458,7 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
         for (sample = 0u; sample < sample_count; sample++) {
             samples[sample] = mem_size_sample(nodes, batch_ms, cfg->write);
         }
-        mem_cool(cfg);
+        lb_bench_cool(cfg);
 
         status = stats_series_push(series, size, samples, sample_count);
         if (status != LB_STATUS_OK) {
@@ -543,7 +475,7 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
         grid_index++;
     }
 
-    mem_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
 
     status = stats_series_detect_steps(series, &steps);
     if (status != LB_STATUS_OK) {
@@ -651,9 +583,9 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
         return LB_STATUS_INVALID_ARG;
     }
 
-    mem_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
-    buffer_bytes = mem_arena_cap(cfg, MEM_LINE_MAX_BYTES, false);
+    buffer_bytes = lb_bench_arena_cap(cfg, MEM_LINE_MAX_BYTES, false);
     if (buffer_bytes < MEM_MIN_ARENA_BYTES) {
         tty_err("memory budget is too small for mem line");
         return LB_STATUS_NOMEM;
@@ -665,7 +597,7 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
         return LB_STATUS_NOMEM;
     }
 
-    arena = pal_mem_alloc(buffer_bytes, mem_arena_flags(cfg));
+    arena = pal_mem_alloc(buffer_bytes, lb_bench_arena_flags(cfg));
     if (arena == NULL) {
         tty_err("cannot allocate a %zu-byte mem line buffer", buffer_bytes);
         goto cleanup;
@@ -696,7 +628,7 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
         tty_kv(cfg, "Accesses / repeats", "%u / %u", MEM_LINE_ACCESSES, MEM_LINE_REPEATS);
     }
 
-    baseline = stats_canary_baseline(MEM_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     for (step_index = 0u; step_index < LB_ARRAY_SIZE(MEM_LINE_STEPS); step_index++) {
         const size_t step = MEM_LINE_STEPS[step_index];
@@ -720,7 +652,7 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
             }
             samples[repeat] = (double)(end - begin) / (double)(size_t)MEM_LINE_ACCESSES;
         }
-        mem_cool(cfg);
+        lb_bench_cool(cfg);
 
         status = stats_series_push(series, step, samples, MEM_LINE_REPEATS);
         if (status != LB_STATUS_OK) {
@@ -728,7 +660,7 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
         }
     }
 
-    mem_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
 
     status = tty_plot_series(cfg, series, NULL, NULL, 0u, 0u);
 
@@ -923,16 +855,16 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
     accesses = cfg->fast ? MEM_ASSOC_FAST_ACCESSES : MEM_ASSOC_ACCESSES;
     repeats = cfg->fast ? MEM_ASSOC_FAST_REPEATS : MEM_ASSOC_REPEATS;
 
-    mem_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
     buffer_bytes =
-        mem_arena_cap(cfg, cfg->fast ? MEM_ASSOC_FAST_MAX_BYTES : MEM_ASSOC_MAX_BYTES, false);
+        lb_bench_arena_cap(cfg, cfg->fast ? MEM_ASSOC_FAST_MAX_BYTES : MEM_ASSOC_MAX_BYTES, false);
     if (buffer_bytes < MEM_MIN_ARENA_BYTES) {
         tty_err("memory budget is too small for mem assoc");
         return LB_STATUS_NOMEM;
     }
 
-    arena = pal_mem_alloc(buffer_bytes, mem_arena_flags(cfg));
+    arena = pal_mem_alloc(buffer_bytes, lb_bench_arena_flags(cfg));
     if (arena == NULL) {
         tty_err("cannot allocate a %zu-byte mem assoc buffer", buffer_bytes);
         goto cleanup;
@@ -952,7 +884,7 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
 
     tty_csv_row(cfg, "mem,assoc,stride_bytes,nodes,ns_per_access");
 
-    baseline = stats_canary_baseline(MEM_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     for (stride_index = 0u; stride_index < stride_count; stride_index++) {
         const size_t stride = MEM_ASSOC_STRIDES[stride_index];
@@ -1001,7 +933,7 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
                     }
                     samples[repeat] = (double)(end - begin) / (double)accesses;
                 }
-                mem_cool(cfg);
+                lb_bench_cool(cfg);
 
                 latencies[stride_index][node_count - 1u] =
                     stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
@@ -1012,7 +944,7 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
         }
     }
 
-    mem_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
     mem_publish_assoc(latencies, limits, stride_count);
     mem_assoc_table(cfg, latencies, limits, stride_count);
     status = LB_STATUS_OK;
@@ -1079,16 +1011,16 @@ lb_status_t mem_prefetch_run(const lb_cfg_t *cfg)
     accesses = cfg->fast ? MEM_PREFETCH_FAST_ACCESSES : MEM_PREFETCH_ACCESSES;
     repeats = cfg->fast ? MEM_PREFETCH_FAST_REPEATS : MEM_PREFETCH_REPEATS;
 
-    mem_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
-    buffer_bytes =
-        mem_arena_cap(cfg, cfg->fast ? MEM_PREFETCH_FAST_MAX_BYTES : MEM_PREFETCH_MAX_BYTES, true);
+    buffer_bytes = lb_bench_arena_cap(
+        cfg, cfg->fast ? MEM_PREFETCH_FAST_MAX_BYTES : MEM_PREFETCH_MAX_BYTES, true);
     if (buffer_bytes < MEM_MIN_ARENA_BYTES) {
         tty_err("memory budget is too small for mem prefetch");
         return LB_STATUS_NOMEM;
     }
 
-    arena = pal_mem_alloc(buffer_bytes, mem_arena_flags(cfg));
+    arena = pal_mem_alloc(buffer_bytes, lb_bench_arena_flags(cfg));
     if (arena == NULL) {
         tty_err("cannot allocate a %zu-byte mem prefetch buffer", buffer_bytes);
         goto cleanup;
@@ -1143,7 +1075,7 @@ lb_status_t mem_prefetch_run(const lb_cfg_t *cfg)
 
     tty_csv_row(cfg, "mem,prefetch,variant,ns_per_access");
 
-    baseline = stats_canary_baseline(MEM_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     for (case_index = 0u; case_index < MEM_PREFETCH_CASES; case_index++) {
         size_t repeat = 0u;
@@ -1164,13 +1096,13 @@ lb_status_t mem_prefetch_run(const lb_cfg_t *cfg)
                     mem_pattern_ns_per_access(buf, buffer_bytes, &patterns[case_index], accesses);
             }
         }
-        mem_cool(cfg);
+        lb_bench_cool(cfg);
 
         results[case_index] = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
         tty_csv_row(cfg, "mem,prefetch,%s,%.3f", patterns[case_index].name, results[case_index]);
     }
 
-    mem_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
 
     tty_section(cfg, "Prefetcher");
     tty_header(cfg, "  %-22s %12s", "Pattern", "ns/access");

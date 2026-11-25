@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bench_common.h"
 #include "defs.h"
 #include "pal/compiler.h"
 #include "pal/pal.h"
@@ -18,12 +19,6 @@
 #include "tty.h"
 #include "types.h"
 #include "util.h"
-
-/* Duration of each DVFS frequency-drift canary measurement. */
-#define CORE_CANARY_MS 20u
-
-/* Arena policy when the platform cannot report the amount of physical RAM. */
-#define CORE_FALLBACK_BUDGET_BYTES (UINT64_C(4) * UINT64_C(1024) * UINT64_C(1024))
 
 /* Smallest arena worth measuring in any subtest. */
 #define CORE_MIN_ARENA_BYTES 4096u
@@ -103,68 +98,6 @@ static volatile uint64_t g_core_sink = 0u;
  * genuine data dependency from the previous load to the next address.
  */
 static volatile uint64_t g_core_zero_mask = 0u;
-
-static size_t core_arena_cap(const lb_cfg_t *cfg, uint64_t limit_bytes, bool reserve_indices)
-{
-    uint64_t budget = pal_safe_max_mem_bytes((uint64_t)cfg->max_mem_mb);
-
-    if (budget == 0u) {
-        budget = CORE_FALLBACK_BUDGET_BYTES;
-    }
-    if (reserve_indices) {
-        /* Leave one ninth of the budget for Sattolo index arrays. */
-        budget = (budget / 9u) * 8u;
-    }
-    if (budget > limit_bytes) {
-        budget = limit_bytes;
-    }
-#if SIZE_MAX < UINT64_MAX
-    if (budget > (uint64_t)SIZE_MAX) {
-        budget = (uint64_t)SIZE_MAX;
-    }
-#endif
-    return (size_t)budget;
-}
-
-static uint32_t core_arena_flags(const lb_cfg_t *cfg)
-{
-    return cfg->no_thp ? PAL_MEM_NO_THP : PAL_MEM_THP;
-}
-
-static void core_apply_runtime(const lb_cfg_t *cfg)
-{
-    if (cfg->runtime_applied) {
-        return;
-    }
-
-    if (cfg->cpu_id >= 0) {
-        if (pal_pin_cpu(cfg->cpu_id) != LB_STATUS_OK) {
-            tty_warn("CPU pinning to %" PRId32 " was not applied", cfg->cpu_id);
-        }
-    }
-
-    if (cfg->qos_set) {
-        if (pal_set_qos(cfg->qos_perf) != LB_STATUS_OK) {
-            tty_warn("QoS request '%s' was not applied", cfg->qos_perf ? "perf" : "bg");
-        }
-    }
-}
-
-static void core_cool(const lb_cfg_t *cfg)
-{
-    if (cfg->cool_ms > 0u) {
-        pal_sleep_ms(cfg->cool_ms);
-    }
-}
-
-static void core_canary_finish(const lb_cfg_t *cfg, uint64_t baseline)
-{
-    const uint64_t after = stats_canary_measure(CORE_CANARY_MS);
-    const double drift = stats_canary_drift_pct(baseline, after);
-
-    tty_warn_drift(cfg, drift);
-    tty_kv(cfg, "DVFS drift", "%+.1f%%", drift);
-}
 
 /* ---------------------------------------------------------------- core ilp */
 
@@ -433,7 +366,7 @@ static void core_ilp_table(const lb_cfg_t *cfg, const char *type, const core_ilp
         for (repeat = 0u; repeat < repeats; repeat++) {
             samples[repeat] = core_ilp_sample(fns[index], iterations, chains);
         }
-        core_cool(cfg);
+        lb_bench_cool(cfg);
 
         ns_per_op = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
         if (index == 0u) {
@@ -461,7 +394,7 @@ lb_status_t core_ilp_run(const lb_cfg_t *cfg)
         return LB_STATUS_INVALID_ARG;
     }
 
-    core_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
     tty_section(cfg, "Instruction-level parallelism");
     tty_kv(cfg, "Iterations / chains", "%" PRIu64 " / 1,2,4,6,8",
@@ -469,14 +402,14 @@ lb_status_t core_ilp_run(const lb_cfg_t *cfg)
     tty_header(cfg, "  %-4s %7s %10s %9s", "Type", "Chains", "ns/op", "Speedup");
     tty_csv_row(cfg, "core,ilp,type,chains,ns_per_op,speedup");
 
-    baseline = stats_canary_baseline(CORE_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     core_ilp_table(cfg, "ALU", CORE_ILP_INT_FNS, &passport->alu_ilp_chains,
                    &passport->alu_ilp_speedup);
     core_ilp_table(cfg, "FPU", CORE_ILP_FP_FNS, &passport->fpu_ilp_chains,
                    &passport->fpu_ilp_speedup);
 
-    core_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
     return LB_STATUS_OK;
 }
 
@@ -587,9 +520,9 @@ lb_status_t core_mlp_run(const lb_cfg_t *cfg)
     iterations = cfg->fast ? CORE_MLP_FAST_ITERATIONS : CORE_MLP_ITERATIONS;
     repeats = cfg->fast ? CORE_FAST_REPEATS : CORE_MLP_REPEATS;
 
-    core_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
-    arena_bytes = core_arena_cap(cfg, CORE_MLP_MAX_BYTES, true);
+    arena_bytes = lb_bench_arena_cap(cfg, CORE_MLP_MAX_BYTES, true);
     if (arena_bytes < CORE_MIN_ARENA_BYTES) {
         tty_err("memory budget is too small for core mlp");
         return LB_STATUS_NOMEM;
@@ -601,7 +534,7 @@ lb_status_t core_mlp_run(const lb_cfg_t *cfg)
         return LB_STATUS_NOMEM;
     }
 
-    arena = pal_mem_alloc(arena_bytes, core_arena_flags(cfg));
+    arena = pal_mem_alloc(arena_bytes, lb_bench_arena_flags(cfg));
     if (arena == NULL) {
         tty_err("cannot allocate a %zu-byte core mlp arena", arena_bytes);
         goto cleanup;
@@ -629,7 +562,7 @@ lb_status_t core_mlp_run(const lb_cfg_t *cfg)
     tty_header(cfg, "  %7s %12s %14s", "Chains", "ns/access", "M accesses/s");
     tty_csv_row(cfg, "core,mlp,chains,ns_per_access,m_accesses_per_s");
 
-    baseline = stats_canary_baseline(CORE_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     for (chain_index = 0u; chain_index < LB_ARRAY_SIZE(CORE_MLP_CHAINS); chain_index++) {
         const size_t chains = CORE_MLP_CHAINS[chain_index];
@@ -651,7 +584,7 @@ lb_status_t core_mlp_run(const lb_cfg_t *cfg)
         for (repeat = 0u; repeat < repeats; repeat++) {
             samples[repeat] = core_mlp_sample(starts, chains, iterations);
         }
-        core_cool(cfg);
+        lb_bench_cool(cfg);
 
         ns_per_access = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
         if (ns_per_access > 0.0) {
@@ -688,7 +621,7 @@ lb_status_t core_mlp_run(const lb_cfg_t *cfg)
         }
     }
 
-    core_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
     status = LB_STATUS_OK;
 
 cleanup:
@@ -775,10 +708,10 @@ lb_status_t core_align_run(const lb_cfg_t *cfg)
         return LB_STATUS_UNSUPPORTED;
     }
 
-    core_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
     arena_bytes = 3u * page_size;
-    arena = pal_mem_alloc(arena_bytes, core_arena_flags(cfg));
+    arena = pal_mem_alloc(arena_bytes, lb_bench_arena_flags(cfg));
     if (arena == NULL) {
         tty_err("cannot allocate a %zu-byte core align buffer", arena_bytes);
         goto cleanup;
@@ -808,7 +741,7 @@ lb_status_t core_align_run(const lb_cfg_t *cfg)
     tty_header(cfg, "  %-12s %8s %12s", "Offset", "Bytes", "ns/read");
     tty_csv_row(cfg, "core,align,offset,ns_per_read");
 
-    baseline = stats_canary_baseline(CORE_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     for (case_index = 0u; case_index < CORE_ALIGN_CASES; case_index++) {
         double samples[CORE_ALIGN_REPEATS] = {0.0};
@@ -819,7 +752,7 @@ lb_status_t core_align_run(const lb_cfg_t *cfg)
         for (repeat = 0u; repeat < repeats; repeat++) {
             samples[repeat] = core_align_sample(base, offsets[case_index], mask, iterations);
         }
-        core_cool(cfg);
+        lb_bench_cool(cfg);
 
         ns_per_read = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
         tty_header(cfg, "  %-12s %8zu %12.4f", CORE_ALIGN_NAMES[case_index], offsets[case_index],
@@ -827,7 +760,7 @@ lb_status_t core_align_run(const lb_cfg_t *cfg)
         tty_csv_row(cfg, "core,align,%zu,%.4f", offsets[case_index], ns_per_read);
     }
 
-    core_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
     status = LB_STATUS_OK;
 
 cleanup:
@@ -1051,13 +984,13 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
         return LB_STATUS_UNSUPPORTED;
     }
 
-    core_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
     arena_bytes = 3u * page_size;
     if (arena_bytes < (CORE_STLF_MIN_BUFFER_BYTES + page_size)) {
         arena_bytes = CORE_STLF_MIN_BUFFER_BYTES + page_size;
     }
-    arena = pal_mem_alloc(arena_bytes, core_arena_flags(cfg));
+    arena = pal_mem_alloc(arena_bytes, lb_bench_arena_flags(cfg));
     if (arena == NULL) {
         tty_err("cannot allocate a %zu-byte core stlf buffer", arena_bytes);
         goto cleanup;
@@ -1084,7 +1017,7 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
     tty_header(cfg, "  %-12s %12s", "Variant", "ns/op");
     tty_csv_row(cfg, "core,stlf,variant,ns_per_op");
 
-    baseline = stats_canary_baseline(CORE_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     for (case_index = 0u; case_index < CORE_STLF_CASES; case_index++) {
         double samples[CORE_STLF_REPEATS] = {0.0};
@@ -1096,7 +1029,7 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
             samples[repeat] =
                 core_stlf_sample(CORE_STLF_FNS[case_index], base, page_size, offset, iterations);
         }
-        core_cool(cfg);
+        lb_bench_cool(cfg);
 
         ns_per_op = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
         if (case_index == 2u || case_index == 4u) {
@@ -1112,7 +1045,7 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
     lb_passport_mutable()->stlf_stall_ns = worst_stall_ns;
     lb_passport_mutable()->stlf_variant = worst_name;
 
-    core_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
     status = LB_STATUS_OK;
 
 cleanup:

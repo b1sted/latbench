@@ -101,6 +101,21 @@ static size_t count_lines(const char *text)
     return lines;
 }
 
+static size_t count_substring(const char *text, const char *needle)
+{
+    size_t count = 0u;
+    const char *cursor = text;
+
+    if (text == NULL || needle == NULL || needle[0] == '\0') {
+        return 0u;
+    }
+    while ((cursor = strstr(cursor, needle)) != NULL) {
+        count++;
+        cursor += strlen(needle);
+    }
+    return count;
+}
+
 static bool csv_rows_valid_cols(const char *text, size_t columns)
 {
     const char *line = text;
@@ -244,6 +259,7 @@ static void test_plot_csv(void)
     cfg.no_color = true;
     cfg.csv = true;
     tty_set_no_color(true);
+    tty_reset_csv_headers();
 
     check_true(capture_start(TEST_CAPTURE_CSV), "CSV capture starts");
     if (g_stdout_captured) {
@@ -261,6 +277,52 @@ static void test_plot_csv(void)
         check_true(strstr(output, " #") == NULL, "CSV output has no bars");
         check_true(count_lines(output) == 5u, "CSV output has one header and four points");
         check_true(csv_rows_valid(output), "every CSV row has the expected column count");
+    }
+
+    stats_series_free(series);
+}
+
+static void test_csv_headers_repeat(void)
+{
+    const char *names[2] = {"L1", "L2"};
+    stats_series_t *series = make_series();
+    stats_steps_t steps = {0};
+    lb_cfg_t cfg = {0};
+    char output[TEST_CAPTURE_SIZE] = {0};
+    const char *header = "test,x,p10_ns,min_ns,p50_ns,p90_ns,p99_ns,samples\n";
+
+    check_true(series != NULL, "repeat series is created");
+    if (series == NULL) {
+        return;
+    }
+
+    make_steps(&steps);
+    cfg.no_color = true;
+    cfg.csv = true;
+    tty_set_no_color(true);
+
+    /* Without a reset, two renders share one header. */
+    tty_reset_csv_headers();
+    check_true(capture_start(TEST_CAPTURE_CSV), "repeat CSV capture starts");
+    if (g_stdout_captured) {
+        check_true(tty_plot_series(&cfg, series, &steps, names, 2u, 0u) == LB_STATUS_OK,
+                   "first repeat plot succeeds");
+        check_true(tty_plot_series(&cfg, series, &steps, names, 2u, 0u) == LB_STATUS_OK,
+                   "second repeat plot succeeds");
+        (void)capture_read(TEST_CAPTURE_CSV, output, sizeof(output));
+        check_true(count_substring(output, header) == 1u,
+                   "repeated plots emit exactly one CSV header");
+    }
+
+    /* A reset starts a fresh stream so the next render prints its header. */
+    tty_reset_csv_headers();
+    check_true(capture_start(TEST_CAPTURE_CSV), "reset CSV capture starts");
+    if (g_stdout_captured) {
+        check_true(tty_plot_series(&cfg, series, &steps, names, 2u, 0u) == LB_STATUS_OK,
+                   "post-reset plot succeeds");
+        (void)capture_read(TEST_CAPTURE_CSV, output, sizeof(output));
+        check_true(strstr(output, header) == output,
+                   "reset makes the next CSV render start with its header");
     }
 
     stats_series_free(series);
@@ -366,6 +428,7 @@ static void test_matrix_csv(void)
     cfg.no_color = true;
     cfg.csv = true;
     tty_set_no_color(true);
+    tty_reset_csv_headers();
 
     check_true(capture_start(TEST_CAPTURE_CSV), "matrix CSV capture starts");
     if (g_stdout_captured) {
@@ -390,6 +453,7 @@ int main(void)
     test_plot_table();
     test_plot_pages();
     test_plot_csv();
+    test_csv_headers_repeat();
     test_matrix_table();
     test_matrix_large_cells();
     test_matrix_csv();

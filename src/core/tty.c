@@ -76,8 +76,9 @@ static bool tty_info_suppressed(const lb_cfg_t *cfg)
 }
 
 /*
- * Plots and matrices still publish their CSV records in auto CSV mode, so they
- * only skip the computation when there is nothing machine-readable to emit.
+ * Auto mode owns the final machine-readable result, so probe plots and matrices
+ * are always suppressed there, including in CSV mode. Otherwise an auto --csv
+ * run would mix the per-probe CSV schemas with the passport records.
  */
 static bool tty_plot_suppressed(const lb_cfg_t *cfg)
 {
@@ -87,7 +88,7 @@ static bool tty_plot_suppressed(const lb_cfg_t *cfg)
     if (cfg->quiet) {
         return true;
     }
-    return cfg->auto_mode && !cfg->csv;
+    return cfg->auto_mode;
 }
 
 static bool tty_color_enabled(const lb_cfg_t *cfg, const FILE *stream)
@@ -126,6 +127,12 @@ static void tty_vline(FILE *stream, const char *prefix, const char *fmt, va_list
 void tty_set_no_color(bool no_color)
 {
     g_tty_no_color = no_color;
+}
+
+void tty_reset_csv_headers(void)
+{
+    g_tty_csv_series_header = false;
+    g_tty_csv_matrix_header = false;
 }
 
 void tty_header(const lb_cfg_t *cfg, const char *fmt, ...)
@@ -188,7 +195,12 @@ void tty_csv_row(const lb_cfg_t *cfg, const char *fmt, ...)
 {
     va_list args;
 
-    if (cfg == NULL || !cfg->csv || fmt == NULL) {
+    /*
+     * Auto mode publishes its own single-schema passport table through a render
+     * copy with auto_mode cleared. Suppressing every probe row here keeps the
+     * auto --csv stream free of the per-probe headers and column layouts.
+     */
+    if (cfg == NULL || !cfg->csv || cfg->auto_mode || fmt == NULL) {
         return;
     }
 

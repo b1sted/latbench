@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "bench_common.h"
 #include "defs.h"
 #include "pal/compiler.h"
 #include "pal/pal.h"
@@ -47,12 +48,6 @@ static const size_t TLB_SIZE_GRID_PAGES[] = {
 #define TLB_CHASE_CHUNK 64u
 #define TLB_CHASE_UNROLL 8u
 
-/* Duration of each DVFS frequency-drift canary measurement. */
-#define TLB_CANARY_MS 20u
-
-/* Arena policy when the platform cannot report the amount of physical RAM. */
-#define TLB_FALLBACK_BUDGET_BYTES (UINT64_C(4) * UINT64_C(1024) * UINT64_C(1024))
-
 /* Upper bounds for the two arenas, also clipped by pal_safe_max_mem_bytes(). */
 #define TLB_SIZE_MAX_BYTES (UINT64_C(256) * UINT64_C(1024) * UINT64_C(1024))
 #define TLB_FAULT_MAX_BYTES (UINT64_C(64) * UINT64_C(1024) * UINT64_C(1024))
@@ -77,59 +72,6 @@ static const char *const TLB_SIZE_LEVELS[] = {"L1 dTLB", "L2 TLB"};
  */
 static volatile uint64_t g_tlb_sink = 0u;
 
-static size_t tlb_arena_cap(const lb_cfg_t *cfg, uint64_t limit_bytes, bool reserve_indices)
-{
-    uint64_t budget = pal_safe_max_mem_bytes((uint64_t)cfg->max_mem_mb);
-
-    if (budget == 0u) {
-        budget = TLB_FALLBACK_BUDGET_BYTES;
-    }
-    if (reserve_indices) {
-        /* Leave one ninth of the budget for the Sattolo index array. */
-        budget = (budget / 9u) * 8u;
-    }
-    if (budget > limit_bytes) {
-        budget = limit_bytes;
-    }
-#if SIZE_MAX < UINT64_MAX
-    if (budget > (uint64_t)SIZE_MAX) {
-        budget = (uint64_t)SIZE_MAX;
-    }
-#endif
-    return (size_t)budget;
-}
-
-static uint32_t tlb_arena_flags(const lb_cfg_t *cfg)
-{
-    return cfg->no_thp ? PAL_MEM_NO_THP : PAL_MEM_THP;
-}
-
-static void tlb_apply_runtime(const lb_cfg_t *cfg)
-{
-    if (cfg->runtime_applied) {
-        return;
-    }
-
-    if (cfg->cpu_id >= 0) {
-        if (pal_pin_cpu(cfg->cpu_id) != LB_STATUS_OK) {
-            tty_warn("CPU pinning to %" PRId32 " was not applied", cfg->cpu_id);
-        }
-    }
-
-    if (cfg->qos_set) {
-        if (pal_set_qos(cfg->qos_perf) != LB_STATUS_OK) {
-            tty_warn("QoS request '%s' was not applied", cfg->qos_perf ? "perf" : "bg");
-        }
-    }
-}
-
-static void tlb_cool(const lb_cfg_t *cfg)
-{
-    if (cfg->cool_ms > 0u) {
-        pal_sleep_ms(cfg->cool_ms);
-    }
-}
-
 static uint32_t tlb_batch_ms(const lb_cfg_t *cfg)
 {
     uint32_t batch = 0u;
@@ -145,15 +87,6 @@ static uint32_t tlb_batch_ms(const lb_cfg_t *cfg)
         batch = TLB_FAST_BATCH_MS;
     }
     return batch;
-}
-
-static void tlb_canary_finish(const lb_cfg_t *cfg, uint64_t baseline)
-{
-    const uint64_t after = stats_canary_measure(TLB_CANARY_MS);
-    const double drift = stats_canary_drift_pct(baseline, after);
-
-    tty_warn_drift(cfg, drift);
-    tty_kv(cfg, "DVFS drift", "%+.1f%%", drift);
 }
 
 /*
@@ -271,9 +204,10 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
         return LB_STATUS_UNSUPPORTED;
     }
 
-    tlb_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
-    arena_bytes = tlb_arena_cap(cfg, cfg->fast ? TLB_FAST_MAX_BYTES : TLB_SIZE_MAX_BYTES, true);
+    arena_bytes =
+        lb_bench_arena_cap(cfg, cfg->fast ? TLB_FAST_MAX_BYTES : TLB_SIZE_MAX_BYTES, true);
     max_pages = arena_bytes / page_size;
     if (max_pages > TLB_SIZE_MAX_PAGES) {
         max_pages = TLB_SIZE_MAX_PAGES;
@@ -284,7 +218,7 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
     }
     arena_bytes = max_pages * page_size;
 
-    arena = pal_mem_alloc(arena_bytes, tlb_arena_flags(cfg));
+    arena = pal_mem_alloc(arena_bytes, lb_bench_arena_flags(cfg));
     if (arena == NULL) {
         tty_err("cannot allocate a %zu-byte tlb size arena", arena_bytes);
         goto cleanup;
@@ -314,7 +248,7 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
         tty_kv(cfg, "Batch / samples", "%" PRIu32 " ms / %zu", batch_ms, sample_count);
     }
 
-    baseline = stats_canary_baseline(TLB_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     for (;;) {
         uint64_t seed = 0u;
@@ -337,7 +271,7 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
         for (sample = 0u; sample < sample_count; sample++) {
             samples[sample] = tlb_size_sample((const tlb_node_t *)(const void *)base, batch_ms);
         }
-        tlb_cool(cfg);
+        lb_bench_cool(cfg);
 
         status = stats_series_push(series, count * page_size, samples, sample_count);
         if (status != LB_STATUS_OK) {
@@ -354,7 +288,7 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
         grid_index++;
     }
 
-    tlb_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
 
     status = stats_series_detect_steps(series, &steps);
     if (status != LB_STATUS_OK) {
@@ -435,9 +369,10 @@ lb_status_t tlb_fault_run(const lb_cfg_t *cfg)
         return LB_STATUS_UNSUPPORTED;
     }
 
-    tlb_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
-    arena_bytes = tlb_arena_cap(cfg, cfg->fast ? TLB_FAST_MAX_BYTES : TLB_FAULT_MAX_BYTES, false);
+    arena_bytes =
+        lb_bench_arena_cap(cfg, cfg->fast ? TLB_FAST_MAX_BYTES : TLB_FAULT_MAX_BYTES, false);
     pages = arena_bytes / page_size;
     if (pages < TLB_FAULT_MIN_PAGES) {
         tty_err("memory budget is too small for tlb fault");
@@ -450,7 +385,7 @@ lb_status_t tlb_fault_run(const lb_cfg_t *cfg)
      * untouched so the first pass measures genuine first-touch page faults.
      * Do not memset() or otherwise initialize it before the timed region.
      */
-    arena = pal_mem_alloc(arena_bytes, tlb_arena_flags(cfg));
+    arena = pal_mem_alloc(arena_bytes, lb_bench_arena_flags(cfg));
     if (arena == NULL) {
         tty_err("cannot allocate a %zu-byte tlb fault arena", arena_bytes);
         goto cleanup;
