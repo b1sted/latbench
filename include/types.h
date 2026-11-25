@@ -68,6 +68,7 @@ typedef struct lb_passport_t {
     double alu_ilp_speedup;
     double fpu_ilp_speedup;
     double stlf_stall_ns;
+    const char *stlf_variant;
     uint64_t rsb_frames;
     uint64_t btb_targets;
     double mispredict_ns;

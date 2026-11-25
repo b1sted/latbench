@@ -161,7 +161,8 @@ static void auto_print_passport(const lb_cfg_t *cfg, const lb_passport_t *p)
         tty_kv(cfg, "ALU/FPU ILP", "not detected");
     }
     if (p->stlf_stall_ns > 0.0) {
-        tty_kv(cfg, "STLF stall", "%.2f ns (4B @ +1)", p->stlf_stall_ns);
+        tty_kv(cfg, "STLF stall", "%.2f ns (%s)", p->stlf_stall_ns,
+               auto_text(p->stlf_variant, "4B @ +1"));
     } else {
         tty_kv(cfg, "STLF stall", "not detected");
     }
@@ -255,6 +256,7 @@ static void auto_publish_csv(const lb_cfg_t *cfg, const lb_passport_t *p)
     tty_csv_row(cfg, "auto,passport,fpu_ilp_chains,%" PRIu32 ",chains", p->fpu_ilp_chains);
     tty_csv_row(cfg, "auto,passport,fpu_ilp_speedup,%.3f,x", p->fpu_ilp_speedup);
     tty_csv_row(cfg, "auto,passport,stlf_stall,%.3f,ns", p->stlf_stall_ns);
+    tty_csv_row(cfg, "auto,passport,stlf_variant,%s,text", auto_text(p->stlf_variant, "none"));
     tty_csv_row(cfg, "auto,passport,rsb,%" PRIu64 ",frames", p->rsb_frames);
     tty_csv_row(cfg, "auto,passport,btb,%" PRIu64 ",targets", p->btb_targets);
     tty_csv_row(cfg, "auto,passport,mispredict,%.3f,ns", p->mispredict_ns);
