@@ -155,6 +155,13 @@ static uint64_t sys_timer_min_step(void)
             if (best == 0u || delta < best) {
                 best = delta;
             }
+        } else if (attempt == 0) {
+            /*
+             * The clock did not move within the whole spin budget on the very
+             * first attempt. Repeating the same million-iteration spin 999
+             * more times cannot discover a finer step; stop immediately.
+             */
+            break;
         }
     }
     return best;
