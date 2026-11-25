@@ -193,13 +193,15 @@ static double dram_bw_copy_sample(uint64_t *dst, const uint64_t *src, size_t wor
 
 lb_status_t dram_bw_run(const lb_cfg_t *cfg)
 {
-    pal_mem_t *arena_a = NULL;
-    pal_mem_t *arena_b = NULL;
-    uint64_t *data_a = NULL;
-    uint64_t *data_b = NULL;
+    pal_mem_t *arena = NULL;
+    uint64_t *data = NULL;
+    uint64_t *copy_src = NULL;
+    uint64_t *copy_dst = NULL;
     const size_t page_size = pal_page_size();
-    size_t bytes = 0u;
+    size_t arena_bytes = 0u;
+    size_t copy_bytes = 0u;
     size_t words = 0u;
+    size_t copy_words = 0u;
     double read_samples[DRAM_BW_REPEATS] = {0.0};
     double write_samples[DRAM_BW_REPEATS] = {0.0};
     double copy_samples[DRAM_BW_REPEATS] = {0.0};
@@ -222,47 +224,48 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
 
     lb_bench_apply_runtime(cfg);
 
-    bytes = lb_bench_arena_cap(cfg, cfg->fast ? DRAM_FAST_MAX_BYTES : DRAM_BW_MAX_BYTES, false);
-    if (bytes < DRAM_BW_MIN_BYTES) {
+    arena_bytes =
+        lb_bench_arena_cap(cfg, cfg->fast ? DRAM_FAST_MAX_BYTES : DRAM_BW_MAX_BYTES, false);
+    arena_bytes = (arena_bytes / page_size) * page_size;
+    if (arena_bytes < DRAM_BW_MIN_BYTES) {
         tty_err("memory budget is too small for dram bw");
         return LB_STATUS_NOMEM;
     }
     /*
-     * Copy bandwidth needs two buffers, so the shared budget is split in half.
-     * On a 32 MiB board a single full-budget buffer per side would otherwise
-     * exceed the free memory and trigger the OOM killer.
+     * Read and write use the whole budget-sized arena. Copy needs two
+     * non-overlapping regions, so it uses the two halves of the same arena:
+     * peak memory stays at arena_bytes and never exceeds the safe budget.
+     * Splitting the allocation up front used to halve read/write throughput
+     * measurements and leave them below large L3/SLC caches.
      */
-    bytes /= 2u;
-    bytes = (bytes / page_size) * page_size;
-    if (bytes < DRAM_BW_MIN_BYTES) {
+    copy_bytes = ((arena_bytes / 2u) / page_size) * page_size;
+    if (copy_bytes < DRAM_BW_MIN_BYTES) {
         tty_err("memory budget is too small for dram bw");
         return LB_STATUS_NOMEM;
     }
-    words = bytes / sizeof(uint64_t);
+    words = arena_bytes / sizeof(uint64_t);
+    copy_words = copy_bytes / sizeof(uint64_t);
 
-    arena_a = pal_mem_alloc(bytes, lb_bench_arena_flags(cfg));
-    if (arena_a == NULL) {
-        tty_err("cannot allocate a %zu-byte dram bw buffer", bytes);
+    arena = pal_mem_alloc(arena_bytes, lb_bench_arena_flags(cfg));
+    if (arena == NULL) {
+        tty_err("cannot allocate a %zu-byte dram bw buffer", arena_bytes);
         goto cleanup;
     }
-    arena_b = pal_mem_alloc(bytes, lb_bench_arena_flags(cfg));
-    if (arena_b == NULL) {
-        tty_err("cannot allocate a second %zu-byte dram bw buffer", bytes);
+    data = pal_mem_data(arena);
+    if (data == NULL) {
         goto cleanup;
     }
-    data_a = pal_mem_data(arena_a);
-    data_b = pal_mem_data(arena_b);
-    if (data_a == NULL || data_b == NULL) {
-        goto cleanup;
-    }
+    copy_src = data;
+    copy_dst = data + copy_words;
 
     {
         char human[LB_NAME_MAX] = {0};
 
-        (void)tty_format_bytes((uint64_t)bytes, human, sizeof(human));
+        (void)tty_format_bytes((uint64_t)arena_bytes, human, sizeof(human));
         tty_section(cfg, "DRAM bandwidth");
-        tty_kv(cfg, "Buffer", "%s (copy uses two buffers)", human);
+        tty_kv(cfg, "Buffer", "%s (copy uses two halves)", human);
         tty_kv(cfg, "Words", "%zu", words);
+        tty_kv(cfg, "Copy words", "%zu", copy_words);
         tty_kv(cfg, "Repeats", "%zu", repeats);
     }
     tty_header(cfg, "  %-8s %12s", "Pattern", "GiB/s");
@@ -271,20 +274,20 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
     baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     /* Warm the pages, the TLB entries, and the prefetchers before timing. */
-    (void)dram_bw_read(data_a, words);
-    (void)dram_bw_write(data_a, words, UINT64_C(0x517cc1b727220a95));
-    (void)dram_bw_copy(data_b, data_a, words);
+    (void)dram_bw_read(data, words);
+    (void)dram_bw_write(data, words, UINT64_C(0x517cc1b727220a95));
+    (void)dram_bw_copy(copy_dst, copy_src, copy_words);
 
     for (repeat = 0u; repeat < repeats; repeat++) {
-        read_samples[repeat] = dram_bw_read_sample(data_a, words);
+        read_samples[repeat] = dram_bw_read_sample(data, words);
     }
     lb_bench_cool(cfg);
     for (repeat = 0u; repeat < repeats; repeat++) {
-        write_samples[repeat] = dram_bw_write_sample(data_a, words);
+        write_samples[repeat] = dram_bw_write_sample(data, words);
     }
     lb_bench_cool(cfg);
     for (repeat = 0u; repeat < repeats; repeat++) {
-        copy_samples[repeat] = dram_bw_copy_sample(data_b, data_a, words);
+        copy_samples[repeat] = dram_bw_copy_sample(copy_dst, copy_src, copy_words);
     }
     lb_bench_cool(cfg);
 
@@ -305,8 +308,7 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
     status = LB_STATUS_OK;
 
 cleanup:
-    pal_mem_free(arena_b);
-    pal_mem_free(arena_a);
+    pal_mem_free(arena);
     return status;
 }
 
