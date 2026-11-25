@@ -679,6 +679,31 @@ static const char *tty_matrix_cell_color(uint64_t ns)
     return TTY_ANSI_MATRIX_SLOW;
 }
 
+/*
+ * Matrix cells are narrow, and a single scheduler outlier can produce an
+ * eight-digit nanosecond value that used to collide with the next column.
+ * Keep every rendered value short enough for the cell width and switch to us
+ * or ms once the number would no longer fit.
+ */
+static void tty_matrix_format_latency(uint64_t ns, char *out, size_t capacity)
+{
+    if (out == NULL || capacity == 0u) {
+        return;
+    }
+
+    if (ns < UINT64_C(100000)) {
+        (void)snprintf(out, capacity, "%" PRIu64, ns);
+    } else if (ns < TTY_NS_PER_MS) {
+        (void)snprintf(out, capacity, "%" PRIu64 "us", (ns + UINT64_C(500)) / TTY_NS_PER_US);
+    } else if (ns < (TTY_NS_PER_MS * UINT64_C(100))) {
+        (void)snprintf(out, capacity, "%.1fms", (double)ns / (double)TTY_NS_PER_MS);
+    } else if (ns < TTY_NS_PER_S) {
+        (void)snprintf(out, capacity, "%" PRIu64 "ms", ns / TTY_NS_PER_MS);
+    } else {
+        (void)snprintf(out, capacity, ">999ms");
+    }
+}
+
 lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint64_t *latency_ns,
                              size_t count)
 {
@@ -716,13 +741,13 @@ lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint6
 
     (void)fprintf(stream, "    |");
     for (j = 0u; j < count; j++) {
-        (void)fprintf(stream, "%*zu", TTY_MATRIX_CELL_WIDTH, j);
+        (void)fprintf(stream, "%*zu ", TTY_MATRIX_CELL_WIDTH, j);
     }
     (void)fputc('\n', stream);
 
     (void)fputs("----+", stream);
     for (j = 0u; j < count; j++) {
-        (void)fputs(TTY_MATRIX_SEPARATOR, stream);
+        (void)fputs(TTY_MATRIX_SEPARATOR " ", stream);
     }
     (void)fputc('\n', stream);
 
@@ -735,7 +760,7 @@ lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint6
             if (i == j) {
                 (void)snprintf(cell, sizeof(cell), "-");
             } else {
-                (void)snprintf(cell, sizeof(cell), "%" PRIu64, latency_ns[i * count + j]);
+                tty_matrix_format_latency(latency_ns[i * count + j], cell, sizeof(cell));
                 if (color) {
                     cell_color = tty_matrix_cell_color(latency_ns[i * count + j]);
                 }
@@ -744,7 +769,7 @@ lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint6
             if (cell_color != NULL) {
                 (void)fputs(cell_color, stream);
             }
-            (void)fprintf(stream, "%*s", TTY_MATRIX_CELL_WIDTH, cell);
+            (void)fprintf(stream, "%*s ", TTY_MATRIX_CELL_WIDTH, cell);
             if (cell_color != NULL) {
                 (void)fputs(TTY_ANSI_RESET, stream);
             }
