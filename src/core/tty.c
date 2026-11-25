@@ -260,12 +260,15 @@ void tty_err(const char *fmt, ...)
     va_end(args);
 }
 
-void tty_warn_drift(double drift_pct)
+void tty_warn_drift(const lb_cfg_t *cfg, double drift_pct)
 {
     /*
      * A moderate positive drift is normal Turbo headroom, not a defect. Only a
      * real slowdown (throttling) or an extreme upward spike is worth a warning.
      */
+    if (cfg != NULL && cfg->suppress_drift_warn) {
+        return;
+    }
     if (drift_pct < -TTY_DRIFT_WARN_DROP_PCT || drift_pct > TTY_DRIFT_WARN_SPIKE_PCT) {
         tty_warn("frequency drift %+.1f%% (drop limit -%.0f%%, spike limit +%.0f%%)", drift_pct,
                  TTY_DRIFT_WARN_DROP_PCT, TTY_DRIFT_WARN_SPIKE_PCT);

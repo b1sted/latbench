@@ -160,7 +160,7 @@ static void core_canary_finish(const lb_cfg_t *cfg, uint64_t baseline)
     const uint64_t after = stats_canary_measure(CORE_CANARY_MS);
     const double drift = stats_canary_drift_pct(baseline, after);
 
-    tty_warn_drift(drift);
+    tty_warn_drift(cfg, drift);
     tty_kv(cfg, "DVFS drift", "%+.1f%%", drift);
 }
 
