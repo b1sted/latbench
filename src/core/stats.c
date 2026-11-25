@@ -143,11 +143,11 @@ static bool stats_plateau_stable(const double *values, size_t count)
     return (max_value / min_value) <= STATS_STEP_PLATEAU_SPREAD_MAX;
 }
 
-static void stats_store_step(stats_step_t *step, const size_t *x, size_t index, double lower,
-                             double upper)
+static void stats_store_step(stats_step_t *step, const size_t *x, size_t fit_index,
+                             size_t edge_index, double lower, double upper)
 {
-    const size_t x_lower = x[index - 1u];
-    const size_t x_upper = x[index];
+    const size_t x_lower = x[fit_index - 1u];
+    const size_t x_upper = x[edge_index];
 
     step->x_lower = x_lower;
     step->x_upper = x_upper;
@@ -168,12 +168,28 @@ static bool stats_same_direction(double prev_lower, double prev_upper, double lo
 }
 
 /*
+ * A stable intermediate plateau means two sharp transitions belong to separate
+ * cache or TLB levels even when they are close on the grid. A run of one or two
+ * points is part of a single transition, not a plateau.
+ */
+static bool stats_plateau_between(const double *values, size_t begin, size_t end)
+{
+    if (values == NULL || end <= begin || (end - begin) < STATS_STEP_WINDOW) {
+        return false;
+    }
+    return stats_plateau_stable(values + begin, end - begin);
+}
+
+/*
  * Append a detected step, or extend the previous one when both describe the
  * same smooth slope. Steps arrive in increasing x order, so the last entry is
- * always the nearest candidate on the low side.
+ * always the nearest candidate on the low side. `fit` is the last point of the
+ * lower plateau (X_fit) and `edge` is the first point above the jump; they
+ * differ when a transition spans two adjacent grid points.
  */
-static void stats_add_step(stats_steps_t *steps, size_t *boundaries, const size_t *x,
-                           size_t boundary, double lower, double upper)
+static void stats_add_step(stats_steps_t *steps, size_t *boundaries, size_t *edges, const size_t *x,
+                           const double *smoothed, size_t fit, size_t edge, double lower,
+                           double upper, bool is_gradual)
 {
     stats_step_t *prev = NULL;
 
@@ -181,14 +197,24 @@ static void stats_add_step(stats_steps_t *steps, size_t *boundaries, const size_
         prev = &steps->items[steps->count - 1u];
         if (stats_same_direction(prev->lower_ns, prev->upper_ns, lower, upper)) {
             const size_t prev_boundary = boundaries[steps->count - 1u];
-            const size_t gap = (boundary > prev_boundary) ? (boundary - prev_boundary) : 0u;
-            const double x_ratio = (double)x[boundary] / (double)x[prev_boundary];
+            const size_t prev_edge = edges[steps->count - 1u];
+            const size_t gap = (fit > prev_boundary) ? (fit - prev_boundary) : 0u;
+            const double x_ratio = (double)x[fit] / (double)x[prev_boundary];
+            const bool plateau = stats_plateau_between(smoothed, prev_edge, fit);
 
-            if ((gap <= STATS_STEP_MERGE_POINTS) && (x_ratio < STATS_STEP_MERGE_RATIO)) {
-                prev->x_upper = x[boundary];
+            /*
+             * A smooth gradual ramp belongs to the same level as the step
+             * before it. A sharp step only merges when there is no stable
+             * plateau in between: two real levels separated by even a few flat
+             * points must stay separate.
+             */
+            if ((gap <= STATS_STEP_MERGE_POINTS) && (x_ratio < STATS_STEP_MERGE_RATIO) &&
+                (is_gradual || !plateau)) {
+                prev->x_upper = x[edge];
                 prev->x = prev->x_lower;
                 prev->upper_ns = upper;
                 prev->ratio = prev->upper_ns / prev->lower_ns;
+                edges[steps->count - 1u] = edge;
                 return;
             }
         }
@@ -197,8 +223,9 @@ static void stats_add_step(stats_steps_t *steps, size_t *boundaries, const size_
     if (steps->count >= STATS_MAX_STEPS) {
         return;
     }
-    stats_store_step(&steps->items[steps->count], x, boundary, lower, upper);
-    boundaries[steps->count] = boundary;
+    stats_store_step(&steps->items[steps->count], x, fit, edge, lower, upper);
+    boundaries[steps->count] = fit;
+    edges[steps->count] = edge;
     steps->count++;
 }
 
@@ -516,21 +543,22 @@ static double stats_window_median(const double *values, size_t begin, size_t end
  * never leak into either plateau. Each side uses at most STATS_STEP_WINDOW
  * points.
  */
-static void stats_measure_plateaus(const double *values, size_t boundary, size_t lower_begin,
-                                   size_t upper_end, double *lower_out, double *upper_out)
+static void stats_measure_plateaus(const double *values, size_t lower_boundary,
+                                   size_t upper_boundary, size_t lower_begin, size_t upper_end,
+                                   double *lower_out, double *upper_out)
 {
     size_t lower_start = lower_begin;
     size_t upper_stop = upper_end;
 
-    if (boundary > lower_begin + STATS_STEP_WINDOW) {
-        lower_start = boundary - STATS_STEP_WINDOW;
+    if (lower_boundary > lower_begin + STATS_STEP_WINDOW) {
+        lower_start = lower_boundary - STATS_STEP_WINDOW;
     }
-    if ((boundary + STATS_STEP_WINDOW) < upper_end) {
-        upper_stop = boundary + STATS_STEP_WINDOW;
+    if ((upper_boundary + STATS_STEP_WINDOW) < upper_end) {
+        upper_stop = upper_boundary + STATS_STEP_WINDOW;
     }
 
-    *lower_out = stats_window_median(values, lower_start, boundary);
-    *upper_out = stats_window_median(values, boundary, upper_stop);
+    *lower_out = stats_window_median(values, lower_start, lower_boundary);
+    *upper_out = stats_window_median(values, upper_boundary, upper_stop);
 }
 
 /*
@@ -580,7 +608,9 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
 {
     double *smoothed = NULL;
     size_t *sharp = NULL;
+    size_t *sharp_fit = NULL;
     size_t boundaries[STATS_MAX_STEPS] = {0u};
+    size_t edges[STATS_MAX_STEPS] = {0u};
     size_t sharp_count = 0u;
     double min_jump = 0.0;
     size_t i = 0u;
@@ -607,13 +637,15 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
     if (count < 4u) {
         return LB_STATUS_OK;
     }
-    if (count > SIZE_MAX / sizeof(*smoothed) || count > SIZE_MAX / sizeof(*sharp)) {
+    if (count > SIZE_MAX / sizeof(*smoothed) || count > SIZE_MAX / sizeof(*sharp) ||
+        count > SIZE_MAX / sizeof(*sharp_fit)) {
         return LB_STATUS_NOMEM;
     }
 
     smoothed = malloc(count * sizeof(*smoothed));
     sharp = malloc(count * sizeof(*sharp));
-    if (smoothed == NULL || sharp == NULL) {
+    sharp_fit = malloc(count * sizeof(*sharp_fit));
+    if (smoothed == NULL || sharp == NULL || sharp_fit == NULL) {
         goto cleanup;
     }
     status = stats_smooth_median3(latency_ns, count, smoothed);
@@ -630,7 +662,9 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
      * Sharp steps are found directly between adjacent smoothed points. This
      * preserves the exact plateau edge (the old window-only scan smeared the
      * first jump into the next one). Two adjacent candidates are the same
-     * physical edge, so keep the stronger one.
+     * physical transition: keep the first boundary as X_fit so it stays on the
+     * lower plateau, and only move the measured upper edge when the second
+     * point is stronger.
      */
     for (i = 1u; i < count; i++) {
         if (!stats_jump_significant(smoothed[i - 1u], smoothed[i], min_jump)) {
@@ -655,6 +689,7 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
             continue;
         }
         sharp[sharp_count] = i;
+        sharp_fit[sharp_count] = i;
         sharp_count++;
     }
 
@@ -670,8 +705,10 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
             if (steps->count >= STATS_MAX_STEPS) {
                 break;
             }
-            stats_measure_plateaus(smoothed, gradual, segment_begin, segment_end, &lower, &upper);
-            stats_add_step(steps, boundaries, x, gradual, lower, upper);
+            stats_measure_plateaus(smoothed, gradual, gradual, segment_begin, segment_end, &lower,
+                                   &upper);
+            stats_add_step(steps, boundaries, edges, x, smoothed, gradual, gradual, lower, upper,
+                           true);
         }
 
         if (segment_index == sharp_count) {
@@ -682,15 +719,16 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
         }
 
         {
-            const size_t boundary = sharp[segment_index];
+            const size_t edge = sharp[segment_index];
+            const size_t fit = sharp_fit[segment_index];
             const size_t lower_begin = (segment_index == 0u) ? 0u : sharp[segment_index - 1u];
             const size_t upper_end =
                 ((segment_index + 1u) < sharp_count) ? sharp[segment_index + 1u] : count;
             double lower = 0.0;
             double upper = 0.0;
 
-            stats_measure_plateaus(smoothed, boundary, lower_begin, upper_end, &lower, &upper);
-            stats_add_step(steps, boundaries, x, boundary, lower, upper);
+            stats_measure_plateaus(smoothed, fit, edge, lower_begin, upper_end, &lower, &upper);
+            stats_add_step(steps, boundaries, edges, x, smoothed, fit, edge, lower, upper, false);
         }
         segment_begin = sharp[segment_index];
     }
@@ -698,6 +736,7 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
     status = LB_STATUS_OK;
 
 cleanup:
+    free(sharp_fit);
     free(sharp);
     free(smoothed);
     return status;
