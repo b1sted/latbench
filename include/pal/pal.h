@@ -96,9 +96,18 @@ bool pal_ilp_scaling_expected(void);
 pal_thread_t *pal_thread_spawn(pal_thread_fn_t fn, void *arg, int32_t pin_cpu, bool qos_perf);
 
 /*
+ * Wait for a spawned thread to finish and release its handle. When pin_status
+ * is not NULL it receives the outcome of the affinity request made by
+ * pal_thread_spawn(): LB_STATUS_OK when no pin was requested or the pin was
+ * applied, otherwise the status returned by pal_pin_cpu().
+ */
+lb_status_t pal_thread_join_ex(pal_thread_t *t, lb_status_t *pin_status);
+
+/*
  * Wait for a spawned thread to finish and release its handle. Passing NULL is
  * an error. On success the handle is invalid and must not be used again; on
- * failure the caller still owns the handle.
+ * failure the caller still owns the handle. Equivalent to
+ * pal_thread_join_ex(t, NULL).
  */
 lb_status_t pal_thread_join(pal_thread_t *t);
 

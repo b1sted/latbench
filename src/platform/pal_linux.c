@@ -109,13 +109,16 @@ lb_status_t pal_pin_cpu(int32_t cpu_id)
     if (cpu_id < 0) {
         return LB_STATUS_INVALID_ARG;
     }
-    if ((uint64_t)cpu_id >= (uint64_t)pal_cpu_count()) {
-        return LB_STATUS_INVALID_ARG;
-    }
     if ((uint32_t)cpu_id >= (uint32_t)CPU_SETSIZE) {
         return LB_STATUS_INVALID_ARG;
     }
 
+    /*
+     * Do not compare against pal_cpu_count(): _SC_NPROCESSORS_ONLN reports the
+     * size of the online cpuset, which can be smaller than the highest valid
+     * CPU ID when cores are offline or the cpuset is sparse. sched_setaffinity()
+     * is the authority on whether this CPU exists and is allowed.
+     */
     CPU_ZERO(&set);
     CPU_SET((unsigned int)cpu_id, &set);
     if (sched_setaffinity(0, sizeof(set), &set) != 0) {

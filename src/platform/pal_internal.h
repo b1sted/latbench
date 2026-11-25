@@ -23,6 +23,7 @@ struct pal_thread {
     pal_thread_fn_t fn;
     void *arg;
     int32_t pin_cpu;
+    lb_status_t pin_status;
     bool qos_perf;
 };
 
