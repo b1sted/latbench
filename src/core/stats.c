@@ -31,6 +31,13 @@
 #define STATS_STEP_PLATEAU_SPREAD_MAX 1.50
 
 /*
+ * The third upper point must not collapse far below the first one. This rejects
+ * a two-point noise spike at the end of a sweep without demanding a perfectly
+ * flat plateau when the next cache transition is nearby.
+ */
+#define STATS_STEP_SUSTAIN_RATIO 0.70
+
+/*
  * A later step within this many points of the previous one, and with a small
  * working-set ratio, belongs to the same smooth slope and must not be reported
  * as a new cache level. The window is wide enough to cover the dense
@@ -635,6 +642,9 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
          * ceiling, not a cache level.
          */
         if ((count - i) < 3u) {
+            continue;
+        }
+        if (smoothed[i + 2u] < (smoothed[i] * STATS_STEP_SUSTAIN_RATIO)) {
             continue;
         }
         if (sharp_count > 0u && i == (sharp[sharp_count - 1u] + 1u)) {
