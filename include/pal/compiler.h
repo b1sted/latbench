@@ -78,12 +78,14 @@ typedef uint8_t pal_unaligned_u8_t;
 
 /*
  * Function-level auto-vectorization suppression. GCC has a dedicated
- * optimization attribute. Clang has no vectorize-only function attribute, so
- * it uses optnone. Prefer PAL_NO_VECTORIZE_LOOP when only a single loop must
- * stay scalar without penalizing the whole function.
+ * optimization attribute. Clang has no vectorize-only function attribute, and
+ * optnone would compile the whole function at -O0 (spilling accumulators,
+ * dropping fmadd, and turning small memcpy() calls into real libc calls), so
+ * Clang relies solely on PAL_NO_VECTORIZE_LOOP placed directly before each
+ * hot loop.
  */
 #if defined(__clang__)
-#define PAL_NO_VECTORIZE __attribute__((optnone))
+#define PAL_NO_VECTORIZE
 #define PAL_NO_VECTORIZE_LOOP _Pragma("clang loop vectorize(disable) interleave(disable)")
 #elif defined(__GNUC__)
 #define PAL_NO_VECTORIZE __attribute__((optimize("no-tree-vectorize")))
