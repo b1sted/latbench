@@ -56,10 +56,26 @@ jobs:
           path: artifact/
           if-no-files-found: error
 
-  build-linux-arm64:
-    name: Build (linux-arm64)
+  build-linux-cross:
+    name: Build (linux-${{ matrix.name }})
     needs: test
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: arm64
+            cross: aarch64-linux-gnu
+            qemu: qemu-aarch64
+            pkg: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          - name: armv7
+            cross: arm-linux-gnueabihf
+            qemu: qemu-arm
+            pkg: gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+          - name: riscv64
+            cross: riscv64-linux-gnu
+            qemu: qemu-riscv64
+            pkg: gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
 
     steps:
       - name: Checkout
@@ -69,15 +85,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
+            ${{ matrix.pkg }} qemu-user
 
       - name: Build static binary
-        run: make CC=aarch64-linux-gnu-gcc STATIC=1 VERSION="${GITHUB_REF_NAME#v}"
+        run: make CC=${{ matrix.cross }}-gcc STATIC=1 VERSION="${GITHUB_REF_NAME#v}"
 
       - name: Smoke test static binary under QEMU
         run: |
-          QEMU_LD_PREFIX=/usr/aarch64-linux-gnu \
-            qemu-aarch64 ./build/bin/latbench -V
+          QEMU_LD_PREFIX=/usr/${{ matrix.cross }} \
+            ${{ matrix.qemu }} ./build/bin/latbench -V
 
       - name: Stage static binary
         run: |
@@ -85,7 +101,7 @@ jobs:
           cp build/bin/latbench artifact/latbench-static
 
       - name: Build dynamic binary
-        run: make clean && make CC=aarch64-linux-gnu-gcc VERSION="${GITHUB_REF_NAME#v}"
+        run: make clean && make CC=${{ matrix.cross }}-gcc VERSION="${GITHUB_REF_NAME#v}"
 
       - name: Stage dynamic binary
         run: cp build/bin/latbench artifact/latbench-dynamic
@@ -93,89 +109,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: latbench-linux-arm64
-          path: artifact/
-          if-no-files-found: error
-
-  build-linux-armv7:
-    name: Build (linux-armv7)
-    needs: test
-    runs-on: ubuntu-22.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-
-      - name: Install cross toolchain and QEMU
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-arm-linux-gnueabihf libc6-dev-armhf-cross qemu-user
-
-      - name: Build static binary
-        run: make CC=arm-linux-gnueabihf-gcc STATIC=1 VERSION="${GITHUB_REF_NAME#v}"
-
-      - name: Smoke test static binary under QEMU
-        run: |
-          QEMU_LD_PREFIX=/usr/arm-linux-gnueabihf \
-            qemu-arm ./build/bin/latbench -V
-
-      - name: Stage static binary
-        run: |
-          mkdir -p artifact
-          cp build/bin/latbench artifact/latbench-static
-
-      - name: Build dynamic binary
-        run: make clean && make CC=arm-linux-gnueabihf-gcc VERSION="${GITHUB_REF_NAME#v}"
-
-      - name: Stage dynamic binary
-        run: cp build/bin/latbench artifact/latbench-dynamic
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: latbench-linux-armv7
-          path: artifact/
-          if-no-files-found: error
-
-  build-linux-riscv64:
-    name: Build (linux-riscv64)
-    needs: test
-    runs-on: ubuntu-22.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-
-      - name: Install cross toolchain and QEMU
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross qemu-user
-
-      - name: Build static binary
-        run: make CC=riscv64-linux-gnu-gcc STATIC=1 VERSION="${GITHUB_REF_NAME#v}"
-
-      - name: Smoke test static binary under QEMU
-        run: |
-          QEMU_LD_PREFIX=/usr/riscv64-linux-gnu \
-            qemu-riscv64 ./build/bin/latbench -V
-
-      - name: Stage static binary
-        run: |
-          mkdir -p artifact
-          cp build/bin/latbench artifact/latbench-static
-
-      - name: Build dynamic binary
-        run: make clean && make CC=riscv64-linux-gnu-gcc VERSION="${GITHUB_REF_NAME#v}"
-
-      - name: Stage dynamic binary
-        run: cp build/bin/latbench artifact/latbench-dynamic
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: latbench-linux-riscv64
+          name: latbench-linux-${{ matrix.name }}
           path: artifact/
           if-no-files-found: error
 
@@ -353,9 +287,7 @@ jobs:
     needs:
       - test
       - build-linux-amd64
-      - build-linux-arm64
-      - build-linux-armv7
-      - build-linux-riscv64
+      - build-linux-cross
       - build-linux-luckfox
       - build-android-termux
       - build-macos-intel
