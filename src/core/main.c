@@ -678,6 +678,9 @@ static void print_command_help(const lb_cfg_t *cfg, const char *command)
 
     tty_section(cfg, "Options");
     help_line(cfg, "--cpu <id>", "pin worker to logical CPU <id>");
+    if (is_auto) {
+        help_line(cfg, "--qos <perf|bg>", "request perf or bg QoS");
+    }
     help_line(cfg, "--batch-ms <ms>", "measurement batch duration (default: 20)");
     help_line(cfg, "--cool-ms <ms>", "cool-down between batches (default: 0)");
     help_line(cfg, "--max-mem <MiB>", "cap arena size (default: 25% of RAM)");
