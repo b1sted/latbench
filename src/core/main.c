@@ -570,6 +570,7 @@ static void print_module_options(const lb_cfg_t *cfg, const lb_module_t *module)
 {
     tty_section(cfg, "Options");
     help_line(cfg, "--cpu <id>", "pin worker to logical CPU <id>");
+    help_line(cfg, "--qos <perf|bg>", "request perf or bg QoS");
     help_line(cfg, "--batch-ms <ms>", "measurement batch duration (default: 20)");
     help_line(cfg, "--cool-ms <ms>", "cool-down between batches (default: 0)");
 
@@ -581,7 +582,6 @@ static void print_module_options(const lb_cfg_t *cfg, const lb_module_t *module)
                   "avoid or allow transparent huge pages (default: no-thp)");
     }
     if (strcmp(module->name, "sys") == 0) {
-        help_line(cfg, "--qos <perf|bg>", "request perf or bg QoS");
         help_line(cfg, "--long", "extend sys throttle duration to 10 seconds");
     }
     if (strcmp(module->name, "mem") == 0) {
@@ -704,6 +704,25 @@ static void print_module_help_to_stderr(const lb_cfg_t *cfg, const lb_module_t *
     print_module_help(&err_cfg, module);
 }
 
+/*
+ * --mode is subtest-specific. "cas"/"flag" belong to topo pingpong and
+ * "thread"/"proc" belong to os ctx; every other command rejects the option so a
+ * typo cannot silently select a value that the probe never reads.
+ */
+static bool mode_is_valid_for_subtest(const char *module, const char *subtest, bool mode_is_topo)
+{
+    if (module == NULL || subtest == NULL) {
+        return false;
+    }
+    if (strcmp(module, "topo") == 0 && strcmp(subtest, "pingpong") == 0) {
+        return mode_is_topo;
+    }
+    if (strcmp(module, "os") == 0 && strcmp(subtest, "ctx") == 0) {
+        return !mode_is_topo;
+    }
+    return false;
+}
+
 static lb_status_t parse_u32_option(const char *option, const char *text, uint32_t *out)
 {
     uint64_t value = 0u;
@@ -747,19 +766,26 @@ static lb_status_t parse_qos_option(const char *text, lb_cfg_t *cfg)
 }
 
 static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_help,
-                              bool *show_version, const char **module_name,
-                              const char **subtest_name)
+                              bool *show_version, bool *mode_set, bool *mode_is_topo,
+                              const char **module_name, const char **subtest_name)
 {
     const char *positionals[2] = {NULL, NULL};
     int positional_count = 0;
     int i = 0;
 
+    *mode_set = false;
+    *mode_is_topo = false;
+
     for (i = 1; i < argc; i++) {
         const char *arg = argv[i];
 
+        /*
+         * Keep scanning after --help so a later --no-color still reaches the
+         * renderer. Help output is printed after parsing completes.
+         */
         if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
             *show_help = true;
-            break;
+            continue;
         }
         if (strcmp(arg, "-V") == 0 || strcmp(arg, "--version") == 0) {
             *show_version = true;
@@ -798,12 +824,20 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
             i++;
             if (strcmp(argv[i], "cas") == 0) {
                 cfg->topo_pingpong_cas = true;
+                *mode_set = true;
+                *mode_is_topo = true;
             } else if (strcmp(argv[i], "flag") == 0) {
                 cfg->topo_pingpong_cas = false;
+                *mode_set = true;
+                *mode_is_topo = true;
             } else if (strcmp(argv[i], "thread") == 0) {
                 cfg->os_ctx_mode = LB_OS_CTX_THREAD;
+                *mode_set = true;
+                *mode_is_topo = false;
             } else if (strcmp(argv[i], "proc") == 0) {
                 cfg->os_ctx_mode = LB_OS_CTX_PROC;
+                *mode_set = true;
+                *mode_is_topo = false;
             } else {
                 tty_err("invalid value for --mode: '%s' (expected cas, flag, thread, or proc)",
                         argv[i]);
@@ -871,6 +905,8 @@ int main(int argc, char **argv)
     lb_cfg_t cfg = {0};
     bool show_help = false;
     bool show_version = false;
+    bool mode_set = false;
+    bool mode_is_topo = false;
     const char *module_name = NULL;
     const char *subtest_name = NULL;
     const lb_module_t *module = NULL;
@@ -895,7 +931,8 @@ int main(int argc, char **argv)
     cfg.runtime_applied = false;
     cfg.os_ctx_mode = LB_OS_CTX_BOTH;
 
-    status = parse_args(argc, argv, &cfg, &show_help, &show_version, &module_name, &subtest_name);
+    status = parse_args(argc, argv, &cfg, &show_help, &show_version, &mode_set, &mode_is_topo,
+                        &module_name, &subtest_name);
     if (status != LB_STATUS_OK) {
         print_help_to_stderr(&cfg);
         return 2;
@@ -928,6 +965,10 @@ int main(int argc, char **argv)
             print_help_to_stderr(&cfg);
             return 2;
         }
+        if (mode_set) {
+            tty_err("--mode is not valid for selftest");
+            return 2;
+        }
         return (lb_selftest_run(&cfg) == LB_STATUS_OK) ? 0 : 1;
     }
 
@@ -939,6 +980,10 @@ int main(int argc, char **argv)
         if (subtest_name != NULL) {
             tty_err("auto does not take a subtest");
             print_help_to_stderr(&cfg);
+            return 2;
+        }
+        if (mode_set) {
+            tty_err("--mode is not valid for auto");
             return 2;
         }
         return (lb_auto_run(&cfg) == LB_STATUS_OK) ? 0 : 1;
@@ -960,6 +1005,12 @@ int main(int argc, char **argv)
     if (subtest == NULL) {
         tty_err("unknown subtest '%s' for module '%s'", subtest_name, module_name);
         print_module_help_to_stderr(&cfg, module);
+        return 2;
+    }
+
+    if (mode_set && !mode_is_valid_for_subtest(module_name, subtest_name, mode_is_topo)) {
+        tty_err("--mode is only valid for 'topo pingpong' (cas|flag) and 'os ctx' "
+                "(thread|proc)");
         return 2;
     }
 
