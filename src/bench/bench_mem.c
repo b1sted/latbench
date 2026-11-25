@@ -58,10 +58,8 @@ static const size_t MEM_SIZE_GRID_KIB[] = {
  */
 #define MEM_FAST_MAX_BYTES (UINT64_C(64) * UINT64_C(1024) * UINT64_C(1024))
 #define MEM_FAST_BATCH_MS 10u
-#define MEM_FAST_SAMPLES 5u
 #define MEM_ASSOC_FAST_MAX_BYTES (UINT64_C(8) * UINT64_C(1024) * UINT64_C(1024))
 #define MEM_ASSOC_FAST_ACCESSES 32768u
-#define MEM_ASSOC_FAST_REPEATS 3u
 #define MEM_PREFETCH_FAST_MAX_BYTES (UINT64_C(8) * UINT64_C(1024) * UINT64_C(1024))
 #define MEM_PREFETCH_FAST_ACCESSES 262144u
 #define MEM_PREFETCH_FAST_REPEATS 2u
@@ -380,7 +378,11 @@ lb_status_t mem_size_run(const lb_cfg_t *cfg)
         return LB_STATUS_INVALID_ARG;
     }
 
-    sample_count = cfg->fast ? MEM_FAST_SAMPLES : MEM_SIZE_SAMPLES;
+    /*
+     * auto/fast keeps the full sample count so the p10 estimate stays stable;
+     * only the arena size and batch window shrink.
+     */
+    sample_count = MEM_SIZE_SAMPLES;
     batch_ms = mem_batch_ms(cfg);
     size_limit = cfg->fast ? MEM_FAST_MAX_BYTES
                            : ((cfg->max_mem_mb == 0u) ? MEM_SIZE_AUTO_MAX_BYTES : UINT64_MAX);
@@ -853,7 +855,11 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
     }
 
     accesses = cfg->fast ? MEM_ASSOC_FAST_ACCESSES : MEM_ASSOC_ACCESSES;
-    repeats = cfg->fast ? MEM_ASSOC_FAST_REPEATS : MEM_ASSOC_REPEATS;
+    /*
+     * auto/fast keeps the full repeat count so the p10 estimate stays stable;
+     * only the arena size and access count shrink.
+     */
+    repeats = MEM_ASSOC_REPEATS;
 
     lb_bench_apply_runtime(cfg);
 
