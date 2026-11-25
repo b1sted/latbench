@@ -62,8 +62,8 @@ static const size_t MEM_SIZE_GRID_KIB[] = {
  * passport run short while still resolving the 32 KiB L1d boundary.
  */
 #define MEM_FAST_MAX_BYTES (UINT64_C(64) * UINT64_C(1024) * UINT64_C(1024))
-#define MEM_FAST_BATCH_MS 5u
-#define MEM_FAST_SAMPLES 3u
+#define MEM_FAST_BATCH_MS 10u
+#define MEM_FAST_SAMPLES 5u
 #define MEM_ASSOC_FAST_MAX_BYTES (UINT64_C(8) * UINT64_C(1024) * UINT64_C(1024))
 #define MEM_ASSOC_FAST_ACCESSES 32768u
 #define MEM_ASSOC_FAST_REPEATS 3u
