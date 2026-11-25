@@ -899,7 +899,6 @@ lb_status_t mem_assoc_run(const lb_cfg_t *cfg)
 
                 tty_csv_row(cfg, "mem,assoc,%zu,%zu,%.3f", stride, node_count,
                             latencies[stride_index][node_count - 1u]);
-                status = LB_STATUS_OK;
             }
         }
     }
