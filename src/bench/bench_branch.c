@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bench_common.h"
 #include "defs.h"
 #include "pal/compiler.h"
 #include "pal/pal.h"
@@ -17,9 +18,6 @@
 #include "tty.h"
 #include "types.h"
 #include "util.h"
-
-/* Duration of each DVFS frequency-drift canary measurement. */
-#define BR_CANARY_MS 20u
 
 /* branch hist: periodic 0/1 pattern, always indexed with the same mask. */
 #define BR_HIST_ARRAY_BYTES 4096u
@@ -87,41 +85,6 @@ static uint8_t g_br_hist_random[BR_HIST_RANDOM_BYTES] = {0};
 
 /* Indirect entry point for the recursive chain. */
 static br_rsb_fn_t volatile g_br_rsb_entry = NULL;
-
-static void br_apply_runtime(const lb_cfg_t *cfg)
-{
-    if (cfg->runtime_applied) {
-        return;
-    }
-
-    if (cfg->cpu_id >= 0) {
-        if (pal_pin_cpu(cfg->cpu_id) != LB_STATUS_OK) {
-            tty_warn("CPU pinning to %" PRId32 " was not applied", cfg->cpu_id);
-        }
-    }
-
-    if (cfg->qos_set) {
-        if (pal_set_qos(cfg->qos_perf) != LB_STATUS_OK) {
-            tty_warn("QoS request '%s' was not applied", cfg->qos_perf ? "perf" : "bg");
-        }
-    }
-}
-
-static void br_cool(const lb_cfg_t *cfg)
-{
-    if (cfg->cool_ms > 0u) {
-        pal_sleep_ms(cfg->cool_ms);
-    }
-}
-
-static void br_canary_finish(const lb_cfg_t *cfg, uint64_t baseline)
-{
-    const uint64_t after = stats_canary_measure(BR_CANARY_MS);
-    const double drift = stats_canary_drift_pct(baseline, after);
-
-    tty_warn_drift(cfg, drift);
-    tty_kv(cfg, "DVFS drift", "%+.1f%%", drift);
-}
 
 /* ------------------------------------------------------------- branch hist */
 
@@ -211,7 +174,7 @@ static double br_hist_measure(const lb_cfg_t *cfg, const uint8_t *pattern, uint6
     for (repeat = 0u; repeat < repeats; repeat++) {
         samples[repeat] = br_hist_sample(pattern, iterations, seed + (uint64_t)repeat, mask);
     }
-    br_cool(cfg);
+    lb_bench_cool(cfg);
 
     return stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
 }
@@ -230,7 +193,7 @@ lb_status_t br_hist_run(const lb_cfg_t *cfg)
         return LB_STATUS_INVALID_ARG;
     }
 
-    br_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
     tty_csv_row(cfg, "branch,hist,pattern,ns_per_branch,delta_ns,delta_pct");
     tty_section(cfg, "Branch history");
@@ -240,7 +203,7 @@ lb_status_t br_hist_run(const lb_cfg_t *cfg)
            cfg->fast ? BR_FAST_REPEATS : BR_HIST_REPEATS);
     tty_header(cfg, "  %-10s %12s %12s %10s", "Pattern", "ns/branch", "delta ns", "delta");
 
-    baseline = stats_canary_baseline(BR_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     memset(g_br_hist_pattern, 0, sizeof(g_br_hist_pattern));
     base_ns = br_hist_measure(cfg, g_br_hist_pattern, UINT64_C(0x13198a2e03707344),
@@ -318,7 +281,7 @@ lb_status_t br_hist_run(const lb_cfg_t *cfg)
         tty_csv_row(cfg, "branch,hist,mispredict_penalty,0.0000,ns");
     }
 
-    br_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
     return LB_STATUS_OK;
 }
 
@@ -385,7 +348,7 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
     iterations = cfg->fast ? BR_RSB_FAST_ITERATIONS : BR_RSB_ITERATIONS;
     repeats = cfg->fast ? BR_FAST_REPEATS : BR_RSB_REPEATS;
 
-    br_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
     g_br_rsb_entry = br_rsb_recurse;
     PAL_BARRIER();
@@ -396,7 +359,7 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
     tty_kv(cfg, "Iterations / repeats", "%" PRIu64 " / %zu", iterations, repeats);
     tty_header(cfg, "  %7s %14s %12s %10s", "Depth", "Calls/top", "ns/call", "delta");
 
-    baseline = stats_canary_baseline(BR_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     for (index = 0u; index < BR_RSB_DEPTH_COUNT; index++) {
         const uint64_t depth = BR_RSB_DEPTHS[index];
@@ -407,7 +370,7 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
         for (repeat = 0u; repeat < repeats; repeat++) {
             samples[repeat] = br_rsb_sample(depth, iterations);
         }
-        br_cool(cfg);
+        lb_bench_cool(cfg);
         ns_per_call[index] = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
     }
 
@@ -461,7 +424,7 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
                     BR_RSB_DEPTHS[BR_RSB_DEPTH_COUNT - 1u]);
     }
 
-    br_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
     return LB_STATUS_OK;
 }
 
@@ -657,7 +620,7 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
     calls = cfg->fast ? BR_BTB_FAST_CALLS : BR_BTB_CALLS;
     repeats = cfg->fast ? BR_FAST_REPEATS : BR_BTB_REPEATS;
 
-    br_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
     tty_csv_row(cfg, "branch,btb,functions,ns_per_call,delta_pct");
     tty_section(cfg, "Branch target buffer");
@@ -665,7 +628,7 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
     tty_kv(cfg, "Calls / repeats", "%" PRIu64 " / %zu", calls, repeats);
     tty_header(cfg, "  %9s %12s %10s", "Functions", "ns/call", "delta");
 
-    baseline = stats_canary_baseline(BR_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     for (index = 0u; index < BR_BTB_COUNT_COUNT; index++) {
         const size_t count = BR_BTB_COUNTS[index];
@@ -677,7 +640,7 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
         for (repeat = 0u; repeat < repeats; repeat++) {
             samples[repeat] = br_btb_sample(count, iterations);
         }
-        br_cool(cfg);
+        lb_bench_cool(cfg);
         ns_per_call[index] = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
     }
 
@@ -721,6 +684,6 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
         tty_csv_row(cfg, "branch,btb,capacity,%zu,targets", BR_BTB_COUNTS[BR_BTB_COUNT_COUNT - 1u]);
     }
 
-    br_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
     return LB_STATUS_OK;
 }

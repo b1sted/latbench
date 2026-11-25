@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "bench_common.h"
 #include "defs.h"
 #include "pal/compiler.h"
 #include "pal/pal.h"
@@ -29,26 +30,6 @@ static uint64_t sys_bytes_to_mib(uint64_t bytes)
     return bytes / (UINT64_C(1024) * UINT64_C(1024));
 }
 
-static const char *sys_status_name(lb_status_t status)
-{
-    switch (status) {
-    case LB_STATUS_OK:
-        return "ok";
-    case LB_STATUS_ERROR:
-        return "error";
-    case LB_STATUS_INVALID_ARG:
-        return "invalid-arg";
-    case LB_STATUS_NOMEM:
-        return "nomem";
-    case LB_STATUS_IO:
-        return "io";
-    case LB_STATUS_UNSUPPORTED:
-        return "unsupported";
-    default:
-        return "unknown";
-    }
-}
-
 static void sys_format_bytes_mib(uint64_t bytes, char *out, size_t capacity)
 {
     char human[LB_NAME_MAX] = {0};
@@ -59,31 +40,6 @@ static void sys_format_bytes_mib(uint64_t bytes, char *out, size_t capacity)
 
     (void)tty_format_bytes(bytes, human, sizeof(human));
     (void)snprintf(out, capacity, "%s (%" PRIu64 " MiB)", human, sys_bytes_to_mib(bytes));
-}
-
-static void sys_apply_runtime(const lb_cfg_t *cfg)
-{
-    if (cfg->runtime_applied) {
-        return;
-    }
-
-    if (cfg->cpu_id >= 0) {
-        const lb_status_t status = pal_pin_cpu(cfg->cpu_id);
-
-        if (status != LB_STATUS_OK) {
-            tty_warn("CPU pinning to %" PRId32 " was not applied (%s)", cfg->cpu_id,
-                     sys_status_name(status));
-        }
-    }
-
-    if (cfg->qos_set) {
-        const lb_status_t status = pal_set_qos(cfg->qos_perf);
-
-        if (status != LB_STATUS_OK) {
-            tty_warn("QoS request '%s' was not applied (%s)", cfg->qos_perf ? "perf" : "bg",
-                     sys_status_name(status));
-        }
-    }
 }
 
 static void sys_format_affinity_qos(const lb_cfg_t *cfg, char *out, size_t capacity)
@@ -117,7 +73,7 @@ lb_status_t sys_info_run(const lb_cfg_t *cfg)
         return LB_STATUS_INVALID_ARG;
     }
 
-    sys_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
     page_size = pal_page_size();
     ram_bytes = pal_total_ram_bytes();
@@ -256,7 +212,7 @@ lb_status_t sys_timer_run(const lb_cfg_t *cfg)
         return LB_STATUS_INVALID_ARG;
     }
 
-    sys_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
     resolution_ns = sys_timer_min_step();
     total_ns = sys_timer_measure_overhead();
@@ -302,7 +258,7 @@ lb_status_t sys_throttle_run(const lb_cfg_t *cfg)
         return LB_STATUS_INVALID_ARG;
     }
 
-    sys_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
     if (cfg->throttle_long) {
         intervals = SYS_THROTTLE_LONG_INTERVALS;

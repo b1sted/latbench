@@ -10,15 +10,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bench_common.h"
 #include "pal/compiler.h"
 #include "pal/pal.h"
 #include "passport.h"
 #include "stats.h"
 #include "tty.h"
 #include "types.h"
-
-/* Duration of each DVFS frequency-drift canary measurement. */
-#define TOPO_CANARY_MS 20u
 
 /* topo atomic: uncontended fetch-add and sequential fence throughput. */
 #define TOPO_ATOMIC_ITERATIONS UINT64_C(5000000)
@@ -88,34 +86,6 @@ typedef struct topo_pp_ctx_t {
     uint64_t rtt_sum_ns;
     uint64_t rounds;
 } topo_pp_ctx_t;
-
-static void topo_apply_runtime(const lb_cfg_t *cfg)
-{
-    if (cfg->runtime_applied) {
-        return;
-    }
-
-    if (cfg->cpu_id >= 0) {
-        if (pal_pin_cpu(cfg->cpu_id) != LB_STATUS_OK) {
-            tty_warn("CPU pinning to %" PRId32 " was not applied", cfg->cpu_id);
-        }
-    }
-
-    if (cfg->qos_set) {
-        if (pal_set_qos(cfg->qos_perf) != LB_STATUS_OK) {
-            tty_warn("QoS request '%s' was not applied", cfg->qos_perf ? "perf" : "bg");
-        }
-    }
-}
-
-static void topo_canary_finish(const lb_cfg_t *cfg, uint64_t baseline)
-{
-    const uint64_t after = stats_canary_measure(TOPO_CANARY_MS);
-    const double drift = stats_canary_drift_pct(baseline, after);
-
-    tty_warn_drift(cfg, drift);
-    tty_kv(cfg, "DVFS drift", "%+.1f%%", drift);
-}
 
 static bool topo_join_thread_status(pal_thread_t **thread, lb_status_t *pin_status)
 {
@@ -212,7 +182,7 @@ lb_status_t topo_atomic_run(const lb_cfg_t *cfg)
     iterations = cfg->fast ? TOPO_ATOMIC_FAST_ITERATIONS : TOPO_ATOMIC_ITERATIONS;
     repeats = cfg->fast ? TOPO_FAST_REPEATS : TOPO_ATOMIC_REPEATS;
 
-    topo_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
     tty_section(cfg, "Topology atomics");
     tty_kv(cfg, "Iterations", "%" PRIu64, iterations);
@@ -220,7 +190,7 @@ lb_status_t topo_atomic_run(const lb_cfg_t *cfg)
     tty_header(cfg, "  %-28s %12s", "Operation", "ns/op");
     tty_csv_row(cfg, "topo,atomic,operation,ns_per_op");
 
-    baseline = stats_canary_baseline(TOPO_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     fetch_ns = topo_atomic_measure(topo_atomic_fetch_add_loop, &cell, iterations, repeats);
     fence_ns = topo_atomic_measure(topo_atomic_fence_loop, &cell, iterations, repeats);
@@ -234,7 +204,7 @@ lb_status_t topo_atomic_run(const lb_cfg_t *cfg)
         tty_warn("topo atomic could not time one of the probes");
     }
 
-    topo_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
     return LB_STATUS_OK;
 }
 
@@ -445,7 +415,7 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
     tty_kv(cfg, "Buffer", "%u bytes (page-aligned)", TOPO_FS_BUFFER_BYTES);
     tty_kv(cfg, "Batch", "%" PRIu32 " ms per offset", batch_ms);
 
-    baseline = stats_canary_baseline(TOPO_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     for (offset_index = 0u; offset_index < (size_t)TOPO_FS_OFFSET_COUNT; offset_index++) {
         const size_t offset = TOPO_FS_OFFSETS[offset_index];
@@ -521,7 +491,7 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
         tty_kv(cfg, "Coherence line", "~%" PRIu32 " B (latency drop threshold)", line_bytes);
     }
 
-    topo_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
 
 cleanup:
     pal_atomic_store_u32_relaxed(&go, 1u);

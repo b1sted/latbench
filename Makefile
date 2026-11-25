@@ -51,9 +51,9 @@ CORE_SRCS := src/core/main.c src/core/stats.c src/core/tty.c src/core/util.c \
 
 # Benchmark suites are listed explicitly so link order stays deterministic.
 # Add new src/bench/*.c files here as their modules are implemented.
-BENCH_SRCS := src/bench/bench_sys.c src/bench/bench_mem.c src/bench/bench_tlb.c \
-	src/bench/bench_core.c src/bench/bench_branch.c src/bench/bench_dram.c \
-	src/bench/bench_topo.c src/bench/bench_os.c
+BENCH_SRCS := src/bench/bench_common.c src/bench/bench_sys.c src/bench/bench_mem.c \
+	src/bench/bench_tlb.c src/bench/bench_core.c src/bench/bench_branch.c \
+	src/bench/bench_dram.c src/bench/bench_topo.c src/bench/bench_os.c
 
 SRCS := $(CORE_SRCS) $(BENCH_SRCS)
 SRCS += $(PLATFORM_SRCS)

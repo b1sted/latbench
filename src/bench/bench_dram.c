@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bench_common.h"
 #include "defs.h"
 #include "pal/compiler.h"
 #include "pal/pal.h"
@@ -18,12 +19,6 @@
 #include "tty.h"
 #include "types.h"
 #include "util.h"
-
-/* Duration of each DVFS frequency-drift canary measurement. */
-#define DRAM_CANARY_MS 20u
-
-/* Arena policy when the platform cannot report the amount of physical RAM. */
-#define DRAM_FALLBACK_BUDGET_BYTES (UINT64_C(4) * UINT64_C(1024) * UINT64_C(1024))
 
 /* dram bw: sequential read, write, and copy over a working set above L3. */
 #define DRAM_BW_MAX_BYTES (UINT64_C(128) * UINT64_C(1024) * UINT64_C(1024))
@@ -58,68 +53,6 @@ typedef struct dram_node_t {
  * optimizer cannot discard the dependent loads or the dirty stores.
  */
 static volatile uint64_t g_dram_sink = 0u;
-
-static size_t dram_arena_cap(const lb_cfg_t *cfg, uint64_t limit_bytes, bool reserve_indices)
-{
-    uint64_t budget = pal_safe_max_mem_bytes((uint64_t)cfg->max_mem_mb);
-
-    if (budget == 0u) {
-        budget = DRAM_FALLBACK_BUDGET_BYTES;
-    }
-    if (reserve_indices) {
-        /* Leave one ninth of the budget for the permutation arrays. */
-        budget = (budget / 9u) * 8u;
-    }
-    if (budget > limit_bytes) {
-        budget = limit_bytes;
-    }
-#if SIZE_MAX < UINT64_MAX
-    if (budget > (uint64_t)SIZE_MAX) {
-        budget = (uint64_t)SIZE_MAX;
-    }
-#endif
-    return (size_t)budget;
-}
-
-static uint32_t dram_arena_flags(const lb_cfg_t *cfg)
-{
-    return cfg->no_thp ? PAL_MEM_NO_THP : PAL_MEM_THP;
-}
-
-static void dram_apply_runtime(const lb_cfg_t *cfg)
-{
-    if (cfg->runtime_applied) {
-        return;
-    }
-
-    if (cfg->cpu_id >= 0) {
-        if (pal_pin_cpu(cfg->cpu_id) != LB_STATUS_OK) {
-            tty_warn("CPU pinning to %" PRId32 " was not applied", cfg->cpu_id);
-        }
-    }
-
-    if (cfg->qos_set) {
-        if (pal_set_qos(cfg->qos_perf) != LB_STATUS_OK) {
-            tty_warn("QoS request '%s' was not applied", cfg->qos_perf ? "perf" : "bg");
-        }
-    }
-}
-
-static void dram_cool(const lb_cfg_t *cfg)
-{
-    if (cfg->cool_ms > 0u) {
-        pal_sleep_ms(cfg->cool_ms);
-    }
-}
-
-static void dram_canary_finish(const lb_cfg_t *cfg, uint64_t baseline)
-{
-    const uint64_t after = stats_canary_measure(DRAM_CANARY_MS);
-    const double drift = stats_canary_drift_pct(baseline, after);
-
-    tty_warn_drift(cfg, drift);
-    tty_kv(cfg, "DVFS drift", "%+.1f%%", drift);
-}
 
 static double dram_gib_per_s(uint64_t bytes, uint64_t elapsed_ns)
 {
@@ -282,9 +215,9 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
         return LB_STATUS_UNSUPPORTED;
     }
 
-    dram_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
-    bytes = dram_arena_cap(cfg, cfg->fast ? DRAM_FAST_MAX_BYTES : DRAM_BW_MAX_BYTES, false);
+    bytes = lb_bench_arena_cap(cfg, cfg->fast ? DRAM_FAST_MAX_BYTES : DRAM_BW_MAX_BYTES, false);
     if (bytes < DRAM_BW_MIN_BYTES) {
         tty_err("memory budget is too small for dram bw");
         return LB_STATUS_NOMEM;
@@ -302,12 +235,12 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
     }
     words = bytes / sizeof(uint64_t);
 
-    arena_a = pal_mem_alloc(bytes, dram_arena_flags(cfg));
+    arena_a = pal_mem_alloc(bytes, lb_bench_arena_flags(cfg));
     if (arena_a == NULL) {
         tty_err("cannot allocate a %zu-byte dram bw buffer", bytes);
         goto cleanup;
     }
-    arena_b = pal_mem_alloc(bytes, dram_arena_flags(cfg));
+    arena_b = pal_mem_alloc(bytes, lb_bench_arena_flags(cfg));
     if (arena_b == NULL) {
         tty_err("cannot allocate a second %zu-byte dram bw buffer", bytes);
         goto cleanup;
@@ -330,7 +263,7 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
     tty_header(cfg, "  %-8s %12s", "Pattern", "GiB/s");
     tty_csv_row(cfg, "dram,bw,pattern,gib_per_s");
 
-    baseline = stats_canary_baseline(DRAM_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     /* Warm the pages, the TLB entries, and the prefetchers before timing. */
     (void)dram_bw_read(data_a, words);
@@ -340,15 +273,15 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
     for (repeat = 0u; repeat < repeats; repeat++) {
         read_samples[repeat] = dram_bw_read_sample(data_a, words);
     }
-    dram_cool(cfg);
+    lb_bench_cool(cfg);
     for (repeat = 0u; repeat < repeats; repeat++) {
         write_samples[repeat] = dram_bw_write_sample(data_a, words);
     }
-    dram_cool(cfg);
+    lb_bench_cool(cfg);
     for (repeat = 0u; repeat < repeats; repeat++) {
         copy_samples[repeat] = dram_bw_copy_sample(data_b, data_a, words);
     }
-    dram_cool(cfg);
+    lb_bench_cool(cfg);
 
     read_gibs = dram_best(read_samples, repeats);
     write_gibs = dram_best(write_samples, repeats);
@@ -363,7 +296,7 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
     tty_csv_row(cfg, "dram,bw,write,%.2f", write_gibs);
     tty_csv_row(cfg, "dram,bw,copy,%.2f", copy_gibs);
 
-    dram_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
     status = LB_STATUS_OK;
 
 cleanup:
@@ -480,9 +413,9 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
         return LB_STATUS_UNSUPPORTED;
     }
 
-    dram_apply_runtime(cfg);
+    lb_bench_apply_runtime(cfg);
 
-    arena_bytes = dram_arena_cap(cfg, DRAM_ROW_MAX_BYTES, true);
+    arena_bytes = lb_bench_arena_cap(cfg, DRAM_ROW_MAX_BYTES, true);
     arena_bytes = (arena_bytes / page_size) * page_size;
     page_count = arena_bytes / page_size;
     if (page_count < DRAM_ROW_MIN_PAGES) {
@@ -492,7 +425,7 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
     node_count = page_count * (size_t)DRAM_ROW_NODES_PER_PAGE;
     arena_bytes = page_count * page_size;
 
-    arena = pal_mem_alloc(arena_bytes, dram_arena_flags(cfg));
+    arena = pal_mem_alloc(arena_bytes, lb_bench_arena_flags(cfg));
     if (arena == NULL) {
         tty_err("cannot allocate a %zu-byte dram row arena", arena_bytes);
         goto cleanup;
@@ -521,7 +454,7 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
     tty_header(cfg, "  %-10s %14s", "Pattern", "ns/access");
     tty_csv_row(cfg, "dram,row,pattern,ns_per_access");
 
-    baseline = stats_canary_baseline(DRAM_CANARY_MS);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     /* same-row: sixteen random nodes inside a page, then a random page jump. */
     status = util_sattolo_indices(page_order, page_count, UINT64_C(0x6a09e667f3bcc909));
@@ -539,7 +472,7 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
     for (repeat = 0u; repeat < repeats; repeat++) {
         same_samples[repeat] = dram_row_sample(&nodes[order[0]], accesses);
     }
-    dram_cool(cfg);
+    lb_bench_cool(cfg);
 
     /* cross-row: one global Sattolo cycle over the same nodes. */
     status = util_sattolo_indices(order, node_count, UINT64_C(0x3c6ef372fe94f82b));
@@ -552,7 +485,7 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
     for (repeat = 0u; repeat < repeats; repeat++) {
         cross_samples[repeat] = dram_row_sample(&nodes[0], accesses);
     }
-    dram_cool(cfg);
+    lb_bench_cool(cfg);
 
     same_ns = stats_percentile(same_samples, repeats, STATS_NOISE_PERCENTILE);
     cross_ns = stats_percentile(cross_samples, repeats, STATS_NOISE_PERCENTILE);
@@ -570,7 +503,7 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
     tty_csv_row(cfg, "dram,row,cross-row,%.2f", cross_ns);
     tty_csv_row(cfg, "dram,row,difference,%.2f", delta_ns);
 
-    dram_canary_finish(cfg, baseline);
+    lb_bench_canary_finish(cfg, baseline, true);
     status = LB_STATUS_OK;
 
 cleanup:
