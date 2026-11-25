@@ -167,11 +167,11 @@ static PAL_NOINLINE uint64_t br_hist_walk(const uint8_t *pattern, uint64_t itera
         const uint8_t bit = pattern[(size_t)i & mask];
 
         if (bit != 0u) {
-            PAL_BLOCK_IFCONV();
+            PAL_BLOCK_IFCONV_T();
             a = (a + b) ^ (i + UINT64_C(0x2545f4914f6cdd1d));
             b = (b ^ a) + UINT64_C(0x6a09e667f3bcc909);
         } else {
-            PAL_BLOCK_IFCONV();
+            PAL_BLOCK_IFCONV_F();
             b = (b + a) ^ (i + UINT64_C(0x2545f4914f6cdd1d));
             a = (a ^ b) + UINT64_C(0x6a09e667f3bcc909);
         }
