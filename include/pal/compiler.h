@@ -177,6 +177,15 @@ static inline uint64_t pal_atomic_fetch_add_u64(uint64_t *ptr, uint64_t value)
 #endif
 }
 
+static inline uint32_t pal_atomic_fetch_add_u32(uint32_t *ptr, uint32_t value)
+{
+#if PAL_HAVE_ATOMIC_BUILTINS
+    return __atomic_fetch_add(ptr, value, __ATOMIC_SEQ_CST);
+#else
+    return (uint32_t)__sync_fetch_and_add(ptr, value);
+#endif
+}
+
 static inline bool pal_atomic_cas_u32(uint32_t *ptr, uint32_t expected, uint32_t desired)
 {
 #if PAL_HAVE_ATOMIC_BUILTINS
