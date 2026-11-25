@@ -359,6 +359,7 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
 {
     double ns_per_call[BR_RSB_DEPTH_COUNT] = {0.0};
     double base_ns = 0.0;
+    size_t base_index = 0u;
     size_t threshold_index = 0u;
     bool threshold_found = false;
     uint64_t iterations = 0u;
@@ -408,6 +409,7 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
     for (index = 0u; index < BR_RSB_DEPTH_COUNT; index++) {
         if (BR_RSB_DEPTHS[index] <= BR_RSB_SMALL_DEPTH && ns_per_call[index] < base_ns) {
             base_ns = ns_per_call[index];
+            base_index = index;
         }
     }
 
@@ -421,9 +423,11 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
         /*
          * A real RSB overflow is persistent: the next depth must stay above the
          * sustain threshold. A single spike (depth 8 on Cortex-A715) no longer
-         * produces a false ~4-frame capacity.
+         * produces a false ~4-frame capacity. Only depths above the chosen
+         * baseline can overflow the RSB; comparing a shallower depth against a
+         * baseline measured at a deeper one would report a false threshold.
          */
-        if (!threshold_found && index > 0u && (index + 1u) < BR_RSB_DEPTH_COUNT &&
+        if (!threshold_found && index > base_index && (index + 1u) < BR_RSB_DEPTH_COUNT &&
             ns_per_call[index] >= (base_ns * (1.0 + (BR_RSB_JUMP_PCT / 100.0))) &&
             ns_per_call[index + 1u] >= (base_ns * (1.0 + (BR_RSB_SUSTAIN_PCT / 100.0)))) {
             threshold_found = true;
