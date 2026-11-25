@@ -1,6 +1,17 @@
 /* SPDX-License-Identifier: GPL-3.0 */
 
+/*
+ * _DEFAULT_SOURCE keeps MAP_ANONYMOUS visible on glibc/uClibc/Bionic, and
+ * _DARWIN_C_SOURCE keeps MAP_ANON visible on macOS when _POSIX_C_SOURCE is
+ * set. Both stay scoped to this platform translation unit only.
+ */
 /* NOLINTBEGIN(bugprone-reserved-identifier, readability-identifier-naming) */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 #define _POSIX_C_SOURCE 200809L
 /* NOLINTEND(bugprone-reserved-identifier, readability-identifier-naming) */
 
