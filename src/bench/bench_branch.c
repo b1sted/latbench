@@ -19,9 +19,12 @@
 #include "types.h"
 #include "util.h"
 
-/* branch hist: periodic 0/1 pattern, always indexed with the same mask. */
+/* branch hist: bit-packed 0/1 patterns, always indexed with the same mask. */
 #define BR_HIST_ARRAY_BYTES 4096u
-#define BR_HIST_RANDOM_BYTES ((size_t)262144u)
+#define BR_HIST_PATTERN_BITS ((size_t)BR_HIST_ARRAY_BYTES * 8u)
+#define BR_HIST_RANDOM_BITS ((size_t)262144u)
+#define BR_HIST_WORD_BITS 64u
+#define BR_HIST_WORD_COUNT ((BR_HIST_RANDOM_BITS + BR_HIST_WORD_BITS - 1u) / BR_HIST_WORD_BITS)
 #define BR_HIST_ITERATIONS UINT64_C(2000000)
 #define BR_HIST_WARMUP UINT64_C(100000)
 #define BR_HIST_REPEATS 3u
@@ -73,20 +76,38 @@ static const size_t BR_BTB_COUNTS[BR_BTB_COUNT_COUNT] = {
  */
 static volatile uint64_t g_br_sink = 0u;
 
-/* The branch-history pattern is rewritten between measurements. */
-static uint8_t g_br_hist_pattern[BR_HIST_ARRAY_BYTES] = {0};
-
 /*
- * Aperiodic reference pattern. It is far longer than any realistic predictor
- * history, so its delta against the constant baseline exposes the full
- * mispredict penalty even on cores that learn every short periodic pattern.
+ * The branch-history pattern is rewritten between measurements. Both the
+ * periodic and the aperiodic reference use the same bit-packed indexing, so
+ * their only difference is branch predictability, not an L1d/L2 footprint
+ * change. 4096 words hold 262144 independent bits in 32 KiB.
  */
-static uint8_t g_br_hist_random[BR_HIST_RANDOM_BYTES] = {0};
+static uint64_t g_br_hist_bits[BR_HIST_WORD_COUNT] = {0u};
 
 /* Indirect entry point for the recursive chain. */
 static br_rsb_fn_t volatile g_br_rsb_entry = NULL;
 
 /* ------------------------------------------------------------- branch hist */
+
+static void br_hist_clear(void)
+{
+    (void)memset(g_br_hist_bits, 0, sizeof(g_br_hist_bits));
+}
+
+static void br_hist_set_bit(size_t index, bool value)
+{
+    const size_t word = index / BR_HIST_WORD_BITS;
+    const uint64_t mask = UINT64_C(1) << (index % BR_HIST_WORD_BITS);
+
+    if (word >= BR_HIST_WORD_COUNT) {
+        return;
+    }
+    if (value) {
+        g_br_hist_bits[word] |= mask;
+    } else {
+        g_br_hist_bits[word] &= ~mask;
+    }
+}
 
 static void br_hist_fill(size_t period, uint64_t seed)
 {
@@ -107,8 +128,9 @@ static void br_hist_fill(size_t period, uint64_t seed)
     base[0] = 0u;
     base[1] = 1u;
 
-    for (i = 0u; i < BR_HIST_ARRAY_BYTES; i++) {
-        g_br_hist_pattern[i] = base[i & mask];
+    br_hist_clear();
+    for (i = 0u; i < BR_HIST_PATTERN_BITS; i++) {
+        br_hist_set_bit(i, base[i & mask] != 0u);
     }
 }
 
@@ -117,12 +139,13 @@ static void br_hist_random_fill(uint64_t seed)
     uint64_t state = seed;
     size_t i = 0u;
 
-    for (i = 0u; i < BR_HIST_RANDOM_BYTES; i++) {
-        g_br_hist_random[i] = (uint8_t)(util_rng_next(&state) & UINT64_C(1));
+    br_hist_clear();
+    for (i = 0u; i < BR_HIST_RANDOM_BITS; i++) {
+        br_hist_set_bit(i, (util_rng_next(&state) & UINT64_C(1)) != 0u);
     }
 }
 
-static PAL_NOINLINE uint64_t br_hist_walk(const uint8_t *pattern, uint64_t iterations,
+static PAL_NOINLINE uint64_t br_hist_walk(const uint64_t *pattern, uint64_t iterations,
                                           uint64_t seed, size_t mask)
 {
     uint64_t a = seed;
@@ -130,7 +153,9 @@ static PAL_NOINLINE uint64_t br_hist_walk(const uint8_t *pattern, uint64_t itera
     uint64_t i = 0u;
 
     for (i = 0u; i < iterations; i++) {
-        const uint8_t bit = pattern[(size_t)i & mask];
+        const size_t bit_index = (size_t)i & mask;
+        const uint64_t word = pattern[bit_index >> 6u];
+        const uint8_t bit = (uint8_t)((word >> (bit_index & 63u)) & UINT64_C(1));
 
         if (bit != 0u) {
             PAL_BLOCK_IFCONV_T();
@@ -148,7 +173,7 @@ static PAL_NOINLINE uint64_t br_hist_walk(const uint8_t *pattern, uint64_t itera
     return g_br_sink;
 }
 
-static double br_hist_sample(const uint8_t *pattern, uint64_t iterations, uint64_t seed,
+static double br_hist_sample(const uint64_t *pattern, uint64_t iterations, uint64_t seed,
                              size_t mask)
 {
     const uint64_t begin = pal_now_ns();
@@ -162,7 +187,7 @@ static double br_hist_sample(const uint8_t *pattern, uint64_t iterations, uint64
     return (double)(end - begin) / (double)iterations;
 }
 
-static double br_hist_measure(const lb_cfg_t *cfg, const uint8_t *pattern, uint64_t seed,
+static double br_hist_measure(const lb_cfg_t *cfg, const uint64_t *pattern, uint64_t seed,
                               size_t mask)
 {
     double samples[BR_HIST_REPEATS] = {0.0};
@@ -205,9 +230,9 @@ lb_status_t br_hist_run(const lb_cfg_t *cfg)
 
     baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
-    memset(g_br_hist_pattern, 0, sizeof(g_br_hist_pattern));
-    base_ns = br_hist_measure(cfg, g_br_hist_pattern, UINT64_C(0x13198a2e03707344),
-                              (size_t)(BR_HIST_ARRAY_BYTES - 1u));
+    br_hist_clear();
+    base_ns = br_hist_measure(cfg, g_br_hist_bits, UINT64_C(0x13198a2e03707344),
+                              (size_t)(BR_HIST_PATTERN_BITS - 1u));
     tty_header(cfg, "  %-10s %12.4f %12.4f %9.1f%%", "const 0", base_ns, 0.0, 0.0);
     tty_csv_row(cfg, "branch,hist,const,%.4f,0.0000,0.00", base_ns);
 
@@ -221,7 +246,7 @@ lb_status_t br_hist_run(const lb_cfg_t *cfg)
 
         br_hist_fill(period, seed);
         ns_per_branch =
-            br_hist_measure(cfg, g_br_hist_pattern, seed, (size_t)(BR_HIST_ARRAY_BYTES - 1u));
+            br_hist_measure(cfg, g_br_hist_bits, seed, (size_t)(BR_HIST_PATTERN_BITS - 1u));
         delta_ns = ns_per_branch - base_ns;
         delta_pct = (base_ns > 0.0) ? ((delta_ns / base_ns) * 100.0) : 0.0;
 
@@ -247,7 +272,7 @@ lb_status_t br_hist_run(const lb_cfg_t *cfg)
 
         br_hist_random_fill(seed);
         ns_per_branch =
-            br_hist_measure(cfg, g_br_hist_random, seed, (size_t)(BR_HIST_RANDOM_BYTES - 1u));
+            br_hist_measure(cfg, g_br_hist_bits, seed, (size_t)(BR_HIST_RANDOM_BITS - 1u));
         delta_pct = (base_ns > 0.0) ? (((ns_per_branch - base_ns) / base_ns) * 100.0) : 0.0;
 
         random_delta = ns_per_branch - base_ns;

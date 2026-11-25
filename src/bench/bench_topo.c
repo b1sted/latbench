@@ -285,9 +285,19 @@ static uint32_t topo_fs_estimate_line(const double *samples, size_t count)
         return 0u;
     }
 
+    /*
+     * A 32-byte line is legitimate on some cores (and under emulation). Skip
+     * the sub-line offsets and report the first plateau at or above 32 bytes.
+     */
     for (i = 0u; i < count; i++) {
-        if (TOPO_FS_OFFSETS[i] >= 64u && samples[i] <= best * 1.15) {
-            return (TOPO_FS_OFFSETS[i] <= 64u) ? 64u : 128u;
+        if (TOPO_FS_OFFSETS[i] >= 32u && samples[i] <= best * 1.15) {
+            if (TOPO_FS_OFFSETS[i] <= 32u) {
+                return 32u;
+            }
+            if (TOPO_FS_OFFSETS[i] <= 64u) {
+                return 64u;
+            }
+            return 128u;
         }
     }
     return 0u;
@@ -539,21 +549,19 @@ static void topo_pp_responder(topo_pp_shared_t *shared, bool cas_mode)
 static void topo_pp_measure_flag(topo_pp_shared_t *shared, uint64_t deadline, topo_pp_ctx_t *ctx)
 {
     uint32_t seq = 1u;
-    uint64_t sum = 0u;
     uint64_t rounds = 0u;
+    uint64_t start = 0u;
+    uint64_t end = 0u;
 
+    /*
+     * Read the clock once per batch. The old per-round-trip timestamps folded
+     * one pal_now_ns() call into every RTT and broke the purity of the spin.
+     */
+    start = pal_now_ns();
     for (;;) {
-        const uint64_t begin = pal_now_ns();
-        uint64_t end = 0u;
-
         pal_atomic_store_u32_relaxed(&shared->flag_a, seq);
         while (pal_atomic_load_u32_relaxed(&shared->flag_b) != seq) {
             /* Bare spin: the token handoff must not be slowed by a pause. */
-        }
-        end = pal_now_ns();
-
-        if (end > begin) {
-            sum += end - begin;
         }
         rounds++;
         seq++;
@@ -564,36 +572,36 @@ static void topo_pp_measure_flag(topo_pp_shared_t *shared, uint64_t deadline, to
             break;
         }
     }
+    end = pal_now_ns();
 
-    ctx->rtt_sum_ns = sum;
+    ctx->rtt_sum_ns = (end > start) ? (end - start) : 0u;
     ctx->rounds = rounds;
 }
 
 static void topo_pp_measure_cas(topo_pp_shared_t *shared, uint64_t deadline, topo_pp_ctx_t *ctx)
 {
-    uint64_t sum = 0u;
     uint64_t rounds = 0u;
+    uint64_t start = 0u;
+    uint64_t end = 0u;
 
+    /*
+     * The first 0 -> 1 acquisition succeeds immediately and is not a round
+     * trip, so it is excluded from the round count below. Timing still wraps
+     * the whole batch: the clock is read only before and after the loop.
+     */
+    start = pal_now_ns();
     for (;;) {
-        const uint64_t begin = pal_now_ns();
-        uint64_t end = 0u;
-
         while (!pal_atomic_cas_u32_relaxed(&shared->token, 0u, 1u)) {
             /* Bare spin: wait for the responder to release the token. */
-        }
-        end = pal_now_ns();
-
-        /* The first acquisition is immediate and does not contain a round trip. */
-        if (rounds > 0u && end > begin) {
-            sum += end - begin;
         }
         rounds++;
         if ((rounds & TOPO_PP_TIME_CHECK_MASK) == 0u && pal_now_ns() >= deadline) {
             break;
         }
     }
+    end = pal_now_ns();
 
-    ctx->rtt_sum_ns = sum;
+    ctx->rtt_sum_ns = (end > start) ? (end - start) : 0u;
     ctx->rounds = (rounds > 1u) ? (rounds - 1u) : 0u;
 }
 
