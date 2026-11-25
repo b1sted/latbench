@@ -28,10 +28,9 @@
 /* Keep plots inside the width of a classic 80-column terminal. */
 #define TTY_PLOT_WIDTH 76u
 #define TTY_PLOT_BAR_WIDTH 20u
-#define TTY_PLOT_FIELD_WIDTH 10
+#define TTY_PLOT_FIELD_WIDTH 9
 #define TTY_PLOT_FLAT_RATIO 1.5
 #define TTY_DRIFT_WARN_DROP_PCT 10.0
-#define TTY_DRIFT_WARN_SPIKE_PCT 25.0
 
 /* Latency heatmap: seven-character cells keep common topologies readable. */
 #define TTY_MATRIX_MAX_SIZE 256u
@@ -148,6 +147,18 @@ void tty_header(const lb_cfg_t *cfg, const char *fmt, ...)
     va_start(args, fmt);
     tty_vline(stream, NULL, fmt, args);
     va_end(args);
+}
+
+void tty_blank(const lb_cfg_t *cfg)
+{
+    FILE *stream = NULL;
+
+    if (cfg == NULL || cfg->auto_mode || cfg->csv || cfg->quiet) {
+        return;
+    }
+
+    stream = tty_info_stream(cfg);
+    (void)fputc('\n', stream);
 }
 
 void tty_section(const lb_cfg_t *cfg, const char *title)
@@ -275,15 +286,16 @@ void tty_err(const char *fmt, ...)
 void tty_warn_drift(const lb_cfg_t *cfg, double drift_pct)
 {
     /*
-     * A moderate positive drift is normal Turbo headroom, not a defect. Only a
-     * real slowdown (throttling) or an extreme upward spike is worth a warning.
+     * A positive drift means the core sped up (Turbo ramp), which is not a
+     * measurement defect; the actual percentage is still shown in the DVFS
+     * drift line. Only a real frequency drop (throttling) is worth a warning.
      */
     if (cfg != NULL && cfg->suppress_drift_warn) {
         return;
     }
-    if (drift_pct < -TTY_DRIFT_WARN_DROP_PCT || drift_pct > TTY_DRIFT_WARN_SPIKE_PCT) {
-        tty_warn("frequency drift %+.1f%% (drop limit -%.0f%%, spike limit +%.0f%%)", drift_pct,
-                 TTY_DRIFT_WARN_DROP_PCT, TTY_DRIFT_WARN_SPIKE_PCT);
+    if (drift_pct < -TTY_DRIFT_WARN_DROP_PCT) {
+        tty_warn("frequency drift %+.1f%% (drop limit -%.0f%%)", drift_pct,
+                 TTY_DRIFT_WARN_DROP_PCT);
     }
 }
 
@@ -480,7 +492,7 @@ static void tty_print_thresholds(const lb_cfg_t *cfg, const stats_steps_t *steps
     bool fits = true;
 
     if (steps == NULL || steps->count == 0u) {
-        tty_header(cfg, "Estimated thresholds: none detected");
+        tty_header(cfg, "  Estimated thresholds: none detected");
         return;
     }
 
@@ -506,11 +518,11 @@ static void tty_print_thresholds(const lb_cfg_t *cfg, const stats_steps_t *steps
     }
 
     if (fits && ((strlen("Estimated thresholds: ") + used) <= TTY_PLOT_WIDTH)) {
-        tty_header(cfg, "Estimated thresholds: %s", list);
+        tty_header(cfg, "  Estimated thresholds: %s", list);
         return;
     }
 
-    tty_header(cfg, "Estimated thresholds:");
+    tty_header(cfg, "  Estimated thresholds:");
     for (i = 0u; i < steps->count && i < STATS_MAX_STEPS; i++) {
         const char *name =
             tty_threshold_name(level_names, level_name_count, i, fallback, sizeof(fallback));
@@ -546,9 +558,28 @@ static void tty_csv_field(const char *text, char *out, size_t capacity)
     out[i] = '\0';
 }
 
-lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
-                            const stats_steps_t *steps, const char *const *level_names,
-                            size_t level_name_count, size_t page_size)
+/*
+ * Pick one fixed decimal precision for the whole latency table. Using a single
+ * format per render keeps the decimal points vertically aligned, unlike the old
+ * %.4g output that changed width from row to row.
+ */
+static int tty_latency_precision(double max_value)
+{
+    if (max_value < 10.0) {
+        return 3;
+    }
+    if (max_value < 100.0) {
+        return 2;
+    }
+    if (max_value < 1000.0) {
+        return 1;
+    }
+    return 0;
+}
+
+lb_status_t tty_plot_series_ex(const lb_cfg_t *cfg, const stats_series_t *series,
+                               const stats_steps_t *steps, const char *const *level_names,
+                               size_t level_name_count, size_t page_size, bool print_section)
 {
     const char *label = NULL;
     stats_point_summary_t *summaries = NULL;
@@ -587,7 +618,9 @@ lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
         }
     }
 
-    tty_section(cfg, label);
+    if (print_section) {
+        tty_section(cfg, label);
+    }
 
     if (cfg != NULL && cfg->csv) {
         if (!g_tty_csv_series_header) {
@@ -625,6 +658,7 @@ lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
         if (have_value && (min_value > 0.0)) {
             flat_scale = (max_value / min_value) < TTY_PLOT_FLAT_RATIO;
         }
+        const int precision = tty_latency_precision(have_value ? max_value : 0.0);
 
         if (page_size > 0u) {
             (void)snprintf(header, sizeof(header), "  %*s %*s %*s %*s %*s  %s",
@@ -648,9 +682,9 @@ lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
             char line[LB_LINE_MAX] = {0};
 
             (void)tty_format_bytes((uint64_t)summaries[i].x, size, sizeof(size));
-            (void)snprintf(p10, sizeof(p10), "%.4g", summaries[i].p10_ns);
-            (void)snprintf(p50, sizeof(p50), "%.4g", summaries[i].p50_ns);
-            (void)snprintf(p90, sizeof(p90), "%.4g", summaries[i].p90_ns);
+            (void)snprintf(p10, sizeof(p10), "%.*f", precision, summaries[i].p10_ns);
+            (void)snprintf(p50, sizeof(p50), "%.*f", precision, summaries[i].p50_ns);
+            (void)snprintf(p90, sizeof(p90), "%.*f", precision, summaries[i].p90_ns);
             (void)snprintf(pages, sizeof(pages), "%zu",
                            tty_pages_for_bytes(summaries[i].x, page_size));
             if (have_value) {
@@ -672,12 +706,20 @@ lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
         }
     }
 
+    tty_blank(cfg);
     tty_print_thresholds(cfg, steps, level_names, level_name_count, page_size);
     status = LB_STATUS_OK;
 
 cleanup:
     free(summaries);
     return status;
+}
+
+lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
+                            const stats_steps_t *steps, const char *const *level_names,
+                            size_t level_name_count, size_t page_size)
+{
+    return tty_plot_series_ex(cfg, series, steps, level_names, level_name_count, page_size, true);
 }
 
 static const char *tty_matrix_cell_color(uint64_t ns)

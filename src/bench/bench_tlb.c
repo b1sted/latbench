@@ -242,11 +242,13 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
         char human[LB_NAME_MAX] = {0};
 
         (void)tty_format_bytes((uint64_t)arena_bytes, human, sizeof(human));
+        tty_section(cfg, "TLB size");
         tty_kv(cfg, "Page size", "%zu bytes", page_size);
         tty_kv(cfg, "Arena limit", "%s", human);
         tty_kv(cfg, "Pages", "%u .. %zu", TLB_SIZE_START_PAGES, max_pages);
         tty_kv(cfg, "Batch / samples", "%" PRIu32 " ms / %zu", batch_ms, sample_count);
     }
+    tty_blank(cfg);
 
     baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
@@ -288,8 +290,6 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
         grid_index++;
     }
 
-    lb_bench_canary_finish(cfg, baseline, true);
-
     status = stats_series_detect_steps(series, &steps);
     if (status != LB_STATUS_OK) {
         goto cleanup;
@@ -301,8 +301,14 @@ lb_status_t tlb_size_run(const lb_cfg_t *cfg)
             lb_passport_mutable()->l1dtlb_entries = (uint32_t)entries;
         }
     }
-    status = tty_plot_series(cfg, series, &steps, TLB_SIZE_LEVELS, LB_ARRAY_SIZE(TLB_SIZE_LEVELS),
-                             page_size);
+    status = tty_plot_series_ex(cfg, series, &steps, TLB_SIZE_LEVELS,
+                                LB_ARRAY_SIZE(TLB_SIZE_LEVELS), page_size, false);
+    if (status != LB_STATUS_OK) {
+        goto cleanup;
+    }
+    tty_blank(cfg);
+    lb_bench_canary_finish(cfg, baseline, true);
+    status = LB_STATUS_OK;
 
 cleanup:
     stats_series_free(series);
@@ -399,11 +405,13 @@ lb_status_t tlb_fault_run(const lb_cfg_t *cfg)
         char human[LB_NAME_MAX] = {0};
 
         (void)tty_format_bytes((uint64_t)arena_bytes, human, sizeof(human));
+        tty_section(cfg, "Page faults");
         tty_kv(cfg, "Page size", "%zu bytes", page_size);
         tty_kv(cfg, "Arena", "%s", human);
         tty_kv(cfg, "Pages", "%zu", pages);
         tty_kv(cfg, "THP policy", "%s", cfg->no_thp ? "no-thp" : "thp");
     }
+    tty_blank(cfg);
 
     tty_csv_row(cfg, "module,subtest,metric,value,unit");
 
@@ -426,7 +434,6 @@ lb_status_t tlb_fault_run(const lb_cfg_t *cfg)
     (void)tty_format_ns(first_ns, first_total, sizeof(first_total));
     (void)tty_format_ns(second_ns, second_total, sizeof(second_total));
 
-    tty_section(cfg, "Page faults");
     tty_header(cfg, "  %-18s %14s %14s", "Pass", "total", "ns/page");
     tty_header(cfg, "  %-18s %14s %14.1f", "first touch", first_total, first_per_page);
     tty_header(cfg, "  %-18s %14s %14.2f", "second pass", second_total, second_per_page);

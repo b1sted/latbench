@@ -187,6 +187,7 @@ lb_status_t topo_atomic_run(const lb_cfg_t *cfg)
     tty_section(cfg, "Topology atomics");
     tty_kv(cfg, "Iterations", "%" PRIu64, iterations);
     tty_kv(cfg, "Repeats", "%zu", repeats);
+    tty_blank(cfg);
     tty_header(cfg, "  %-28s %12s", "Operation", "ns/op");
     tty_csv_row(cfg, "topo,atomic,operation,ns_per_op");
 
@@ -204,6 +205,7 @@ lb_status_t topo_atomic_run(const lb_cfg_t *cfg)
         tty_warn("topo atomic could not time one of the probes");
     }
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, true);
     return LB_STATUS_OK;
 }
@@ -480,6 +482,7 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
             } else {
                 tty_kv(cfg, "Cores", "2 threads, QoS perf (unpinned)");
             }
+            tty_blank(cfg);
             tty_header(cfg, "  %8s %14s", "Offset", "ns/op");
             tty_csv_row(cfg, "topo,falseshare,offset_bytes,ns_per_op");
             header_printed = true;
@@ -495,12 +498,14 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
 
     line_bytes = topo_fs_estimate_line(samples, (size_t)TOPO_FS_OFFSET_COUNT);
     lb_passport_mutable()->coherence_line_bytes = line_bytes;
+    tty_blank(cfg);
     if (line_bytes == 0u) {
         tty_kv(cfg, "Coherence line", "not detected (no clear latency drop)");
     } else {
         tty_kv(cfg, "Coherence line", "~%" PRIu32 " B (latency drop threshold)", line_bytes);
     }
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, true);
 
 cleanup:
@@ -865,6 +870,7 @@ static lb_status_t topo_pp_matrix(const lb_cfg_t *cfg, uint32_t cpu_count, bool 
     }
 
     topo_pp_publish(pair_ns, pair_index);
+    tty_blank(cfg);
     status = tty_print_matrix(cfg, "One-way latency (RTT/2, ns)", matrix, count);
 
 cleanup:
@@ -886,6 +892,7 @@ static lb_status_t topo_pp_mac_pairs(const lb_cfg_t *cfg, bool cas_mode)
     tty_kv(cfg, "Mode", "%s token handoff", cas_mode ? "CAS" : "flag");
     tty_kv(cfg, "QoS", "P = perf, E = efficiency (unpinned)");
     tty_kv(cfg, "Batch", "best of %u x %u ms per pair", TOPO_PP_BATCH_COUNT, TOPO_PP_BATCH_MS);
+    tty_blank(cfg);
     tty_header(cfg, "  %-6s %16s", "Pair", "one-way ns");
     tty_csv_row(cfg, "topo,pingpong,pair,one_way_ns");
 

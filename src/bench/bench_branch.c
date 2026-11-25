@@ -226,6 +226,7 @@ lb_status_t br_hist_run(const lb_cfg_t *cfg)
     tty_kv(cfg, "Iterations / repeats", "%" PRIu64 " / %u",
            cfg->fast ? BR_HIST_FAST_ITERATIONS : BR_HIST_ITERATIONS,
            cfg->fast ? BR_FAST_REPEATS : BR_HIST_REPEATS);
+    tty_blank(cfg);
     tty_header(cfg, "  %-10s %12s %12s %10s", "Pattern", "ns/branch", "delta ns", "delta");
 
     baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
@@ -282,6 +283,7 @@ lb_status_t br_hist_run(const lb_cfg_t *cfg)
                     delta_pct);
     }
 
+    tty_blank(cfg);
     if (history_found) {
         tty_header(cfg, "  History estimate: ~%zu branches (first period over %.0f%% and %.2f ns)",
                    BR_HIST_PERIODS[history_index], BR_HIST_DELTA_MIN_PCT, BR_HIST_DELTA_MIN_NS);
@@ -306,6 +308,7 @@ lb_status_t br_hist_run(const lb_cfg_t *cfg)
         tty_csv_row(cfg, "branch,hist,mispredict_penalty,0.0000,ns");
     }
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, true);
     return LB_STATUS_OK;
 }
@@ -383,6 +386,7 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
     tty_section(cfg, "Return-stack buffer");
     tty_kv(cfg, "Recursion", "noinline chain through a volatile function pointer");
     tty_kv(cfg, "Iterations / repeats", "%" PRIu64 " / %zu", iterations, repeats);
+    tty_blank(cfg);
     tty_header(cfg, "  %7s %14s %12s %10s", "Depth", "Calls/top", "ns/call", "delta");
 
     baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
@@ -441,18 +445,21 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
 
     if (threshold_found) {
         lb_passport_mutable()->rsb_frames = BR_RSB_DEPTHS[threshold_index - 1u];
+        tty_blank(cfg);
         tty_header(cfg, "  RSB threshold: ~%" PRIu64 " frames (next depth +%.0f%%)",
                    BR_RSB_DEPTHS[threshold_index - 1u], BR_RSB_JUMP_PCT);
         tty_csv_row(cfg, "branch,rsb,threshold,%" PRIu64 ",frames",
                     BR_RSB_DEPTHS[threshold_index - 1u]);
     } else {
         lb_passport_mutable()->rsb_frames = BR_RSB_DEPTHS[BR_RSB_DEPTH_COUNT - 1u];
+        tty_blank(cfg);
         tty_header(cfg, "  RSB threshold: beyond %" PRIu64 " frames",
                    BR_RSB_DEPTHS[BR_RSB_DEPTH_COUNT - 1u]);
         tty_csv_row(cfg, "branch,rsb,threshold,%" PRIu64 ",frames",
                     BR_RSB_DEPTHS[BR_RSB_DEPTH_COUNT - 1u]);
     }
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, true);
     return LB_STATUS_OK;
 }
@@ -655,6 +662,7 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
     tty_section(cfg, "Branch target buffer");
     tty_kv(cfg, "Trampolines", "16 .. 1024 unique noinline targets");
     tty_kv(cfg, "Calls / repeats", "%" PRIu64 " / %zu", calls, repeats);
+    tty_blank(cfg);
     tty_header(cfg, "  %9s %12s %10s", "Functions", "ns/call", "delta");
 
     baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
@@ -703,16 +711,19 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
 
     if (threshold_found) {
         lb_passport_mutable()->btb_targets = BR_BTB_COUNTS[threshold_index - 1u];
+        tty_blank(cfg);
         tty_header(cfg, "  BTB / L1i capacity: ~%zu targets (next count +%.0f%%)",
                    BR_BTB_COUNTS[threshold_index - 1u], BR_BTB_JUMP_PCT);
         tty_csv_row(cfg, "branch,btb,capacity,%zu,targets", BR_BTB_COUNTS[threshold_index - 1u]);
     } else {
         lb_passport_mutable()->btb_targets = BR_BTB_COUNTS[BR_BTB_COUNT_COUNT - 1u];
+        tty_blank(cfg);
         tty_header(cfg, "  BTB / L1i capacity: beyond %zu targets",
                    BR_BTB_COUNTS[BR_BTB_COUNT_COUNT - 1u]);
         tty_csv_row(cfg, "branch,btb,capacity,%zu,targets", BR_BTB_COUNTS[BR_BTB_COUNT_COUNT - 1u]);
     }
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, true);
     return LB_STATUS_OK;
 }

@@ -134,9 +134,13 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
 uint64_t stats_canary_measure(uint32_t duration_ms);
 
 /*
- * Warm the canary for about 50 ms and then take the baseline reading. The
- * warm-up lets the core settle into its working Turbo P-state so a cold first
- * sample does not look like a frequency drop.
+ * Warm the canary adaptively and then take the baseline reading. Short 25 ms
+ * slices repeat until two consecutive runs agree within three percent or the
+ * 250 ms warm-up ceiling is reached. This lets amd_pstate and laptop cores
+ * settle into their working Turbo P-state before the baseline is recorded.
+ * The first real probe in a process also pays a one-time platform prime so
+ * amd_pstate/EPP cores that stay idle for over a second still reach Turbo.
+ * Probes with duration_ms <= 5 use a single short slice to stay fast in tests.
  */
 uint64_t stats_canary_baseline(uint32_t duration_ms);
 

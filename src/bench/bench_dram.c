@@ -264,10 +264,9 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
         (void)tty_format_bytes((uint64_t)arena_bytes, human, sizeof(human));
         tty_section(cfg, "DRAM bandwidth");
         tty_kv(cfg, "Buffer", "%s (copy uses two halves)", human);
-        tty_kv(cfg, "Words", "%zu", words);
-        tty_kv(cfg, "Copy words", "%zu", copy_words);
         tty_kv(cfg, "Repeats", "%zu", repeats);
     }
+    tty_blank(cfg);
     tty_header(cfg, "  %-8s %12s", "Pattern", "GiB/s");
     tty_csv_row(cfg, "dram,bw,pattern,gib_per_s");
 
@@ -304,6 +303,7 @@ lb_status_t dram_bw_run(const lb_cfg_t *cfg)
     tty_csv_row(cfg, "dram,bw,write,%.2f", write_gibs);
     tty_csv_row(cfg, "dram,bw,copy,%.2f", copy_gibs);
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, true);
     status = LB_STATUS_OK;
 
@@ -462,6 +462,7 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
         tty_kv(cfg, "Row / node stride", "%u / %u bytes", DRAM_ROW_BYTES, DRAM_ROW_NODE_BYTES);
         tty_kv(cfg, "Accesses / repeats", "%" PRIu64 " / %zu", accesses, repeats);
     }
+    tty_blank(cfg);
     tty_header(cfg, "  %-10s %14s", "Pattern", "ns/access");
     tty_csv_row(cfg, "dram,row,pattern,ns_per_access");
 
@@ -514,6 +515,7 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
     tty_csv_row(cfg, "dram,row,cross-row,%.2f", cross_ns);
     tty_csv_row(cfg, "dram,row,difference,%.2f", delta_ns);
 
+    tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, true);
     status = LB_STATUS_OK;
 
