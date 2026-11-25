@@ -50,7 +50,7 @@ jobs:
         run: cp build/bin/latbench artifact/latbench-dynamic
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: latbench-linux-amd64
           path: artifact/
@@ -91,7 +91,7 @@ jobs:
         run: cp build/bin/latbench artifact/latbench-dynamic
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: latbench-linux-arm64
           path: artifact/
@@ -132,7 +132,7 @@ jobs:
         run: cp build/bin/latbench artifact/latbench-dynamic
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: latbench-linux-armv7
           path: artifact/
@@ -173,7 +173,7 @@ jobs:
         run: cp build/bin/latbench artifact/latbench-dynamic
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: latbench-linux-riscv64
           path: artifact/
@@ -210,7 +210,7 @@ jobs:
           cp build/bin/latbench artifact/latbench
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: latbench-linux-luckfox
           path: artifact/
@@ -291,7 +291,7 @@ jobs:
             ' _ "${GITHUB_REF_NAME}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: latbench-android-termux-${{ matrix.name }}
           path: artifact/
@@ -336,7 +336,7 @@ jobs:
           cp build/bin/latbench artifact/latbench
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: latbench-macos-intel
           path: artifact/
@@ -365,7 +365,7 @@ jobs:
           cp build/bin/latbench artifact/latbench
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: latbench-macos-arm64
           path: artifact/
@@ -394,7 +394,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -490,7 +490,7 @@ jobs:
           subject-path: 'release_dist/*'
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: release_dist/*
           generate_release_notes: true
