@@ -13,6 +13,7 @@
 # Standalone test capture files written to the working directory.
 /test_tty_capture.out
 /test_tty_capture.csv
+/test_auto_capture.csv
 
 # Generated benchmark reports stay local and are never committed.
 /latbench-*.txt
