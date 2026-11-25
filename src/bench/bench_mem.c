@@ -66,7 +66,7 @@ static const size_t MEM_SIZE_GRID_KIB[] = {
 #define MEM_FAST_SAMPLES 3u
 #define MEM_ASSOC_FAST_MAX_BYTES (UINT64_C(8) * UINT64_C(1024) * UINT64_C(1024))
 #define MEM_ASSOC_FAST_ACCESSES 16384u
-#define MEM_ASSOC_FAST_REPEATS 2u
+#define MEM_ASSOC_FAST_REPEATS 3u
 #define MEM_PREFETCH_FAST_MAX_BYTES (UINT64_C(8) * UINT64_C(1024) * UINT64_C(1024))
 #define MEM_PREFETCH_FAST_ACCESSES 262144u
 #define MEM_PREFETCH_FAST_REPEATS 2u
@@ -107,6 +107,14 @@ static const size_t MEM_SIZE_GRID_KIB[] = {
  * consensus therefore uses only the larger strides, where the knee settles.
  */
 #define MEM_ASSOC_CONSENSUS_MIN_STRIDE 8192u
+
+/*
+ * A knee below this jump factor is usually an L1-to-L2 transition on a stride
+ * that aliases out of the L1d, not the associativity limit. Such knees would
+ * otherwise drag the consensus towards a small way count on Intel cores whose
+ * large strides skip a level.
+ */
+#define MEM_ASSOC_CONSENSUS_RATIO_MIN 2.50
 
 /* mem prefetch: sequential, strided, and Sattolo-random line walks. */
 #define MEM_PREFETCH_MAX_BYTES (UINT64_C(32) * UINT64_C(1024) * UINT64_C(1024))
@@ -783,14 +791,38 @@ static size_t mem_assoc_knee(const double *row, size_t limit, double *ratio_out)
  * first conflicting N, so the last fitting N is knee - 1. A lower median keeps
  * one noisy stride from moving the passport.
  */
+static void mem_sort_ways(uint32_t *values, size_t count)
+{
+    size_t i = 0u;
+
+    for (i = 1u; i < count; i++) {
+        const uint32_t value = values[i];
+        size_t j = i;
+
+        while (j > 0u && values[j - 1u] > value) {
+            values[j] = values[j - 1u];
+            j--;
+        }
+        values[j] = value;
+    }
+}
+
+/*
+ * Publish the associativity consensus over the larger strides. The knee is the
+ * first conflicting N, so the last fitting N is knee - 1. Knees with a weak
+ * jump are L1-to-L2 transitions on aliasing strides, not an associativity
+ * limit, so the consensus prefers the convincing knees and falls back to every
+ * valid high-stride knee when too few are strong.
+ */
 static void mem_publish_assoc(double latencies[][MEM_ASSOC_MAX_NODES], const size_t limits[],
                               size_t stride_count)
 {
     lb_passport_t *passport = lb_passport_mutable();
-    uint32_t ways_values[LB_ARRAY_SIZE(MEM_ASSOC_STRIDES)] = {0u};
-    size_t ways_count = 0u;
+    uint32_t ways_all[LB_ARRAY_SIZE(MEM_ASSOC_STRIDES)] = {0u};
+    uint32_t ways_strong[LB_ARRAY_SIZE(MEM_ASSOC_STRIDES)] = {0u};
+    size_t all_count = 0u;
+    size_t strong_count = 0u;
     size_t stride_index = 0u;
-    size_t i = 0u;
 
     for (stride_index = 0u; stride_index < stride_count; stride_index++) {
         double ratio = 0.0;
@@ -801,24 +833,23 @@ static void mem_publish_assoc(double latencies[][MEM_ASSOC_MAX_NODES], const siz
         }
         ways = mem_assoc_knee(latencies[stride_index], limits[stride_index], &ratio);
         if (ways > 1u && ways <= MEM_ASSOC_MAX_NODES) {
-            ways_values[ways_count] = (uint32_t)(ways - 1u);
-            ways_count++;
+            const uint32_t last_fitting = (uint32_t)(ways - 1u);
+
+            ways_all[all_count] = last_fitting;
+            all_count++;
+            if (ratio >= MEM_ASSOC_CONSENSUS_RATIO_MIN) {
+                ways_strong[strong_count] = last_fitting;
+                strong_count++;
+            }
         }
     }
 
-    for (i = 1u; i < ways_count; i++) {
-        const uint32_t value = ways_values[i];
-        size_t j = i;
-
-        while (j > 0u && ways_values[j - 1u] > value) {
-            ways_values[j] = ways_values[j - 1u];
-            j--;
-        }
-        ways_values[j] = value;
-    }
-
-    if (ways_count > 0u) {
-        passport->l1d_ways = ways_values[(ways_count - 1u) / 2u];
+    if (strong_count >= 2u) {
+        mem_sort_ways(ways_strong, strong_count);
+        passport->l1d_ways = ways_strong[(strong_count - 1u) / 2u];
+    } else if (all_count > 0u) {
+        mem_sort_ways(ways_all, all_count);
+        passport->l1d_ways = ways_all[(all_count - 1u) / 2u];
     } else {
         passport->l1d_ways = 0u;
     }
