@@ -33,10 +33,12 @@
 /*
  * A later step within this many points of the previous one, and with a small
  * working-set ratio, belongs to the same smooth slope and must not be reported
- * as a new cache level.
+ * as a new cache level. The window is wide enough to cover the dense
+ * hardware-aligned grid around a small L2, where a gradual L2-to-RAM slope used
+ * to split a two-level cache into three levels.
  */
-#define STATS_STEP_MERGE_POINTS 3u
-#define STATS_STEP_MERGE_RATIO 2.50
+#define STATS_STEP_MERGE_POINTS 6u
+#define STATS_STEP_MERGE_RATIO 3.00
 
 /* Dependent ALU chain iterations between clock reads in the canary. */
 #define STATS_CANARY_CHUNK 4096u
@@ -142,7 +144,12 @@ static void stats_store_step(stats_step_t *step, const size_t *x, size_t index, 
 
     step->x_lower = x_lower;
     step->x_upper = x_upper;
-    step->x = x_lower + (x_upper - x_lower) / 2u;
+    /*
+     * Report the last point of the lower plateau (X_fit) instead of the middle
+     * of the boundary interval. The plateau end is the usable capacity of the
+     * level; the first point beyond it has already paid the jump.
+     */
+    step->x = x_lower;
     step->lower_ns = lower;
     step->upper_ns = upper;
     step->ratio = upper / lower;
@@ -172,7 +179,7 @@ static void stats_add_step(stats_steps_t *steps, size_t *boundaries, const size_
 
             if ((gap <= STATS_STEP_MERGE_POINTS) && (x_ratio < STATS_STEP_MERGE_RATIO)) {
                 prev->x_upper = x[boundary];
-                prev->x = prev->x_lower + (prev->x_upper - prev->x_lower) / 2u;
+                prev->x = prev->x_lower;
                 prev->upper_ns = upper;
                 prev->ratio = prev->upper_ns / prev->lower_ns;
                 return;
