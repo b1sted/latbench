@@ -152,7 +152,7 @@ static void *pal_thread_trampoline(void *opaque)
     }
 
     if (thread->pin_cpu >= 0) {
-        (void)pal_pin_cpu(thread->pin_cpu);
+        thread->pin_status = pal_pin_cpu(thread->pin_cpu);
     }
     if (thread->qos_perf) {
         (void)pal_set_qos(true);
@@ -180,6 +180,7 @@ pal_thread_t *pal_thread_spawn(pal_thread_fn_t fn, void *arg, int32_t pin_cpu, b
     thread->fn = fn;
     thread->arg = arg;
     thread->pin_cpu = pin_cpu;
+    thread->pin_status = (pin_cpu >= 0) ? LB_STATUS_ERROR : LB_STATUS_OK;
     thread->qos_perf = qos_perf;
 
     rc = pthread_create(&thread->handle, NULL, pal_thread_trampoline, thread);
@@ -190,7 +191,7 @@ pal_thread_t *pal_thread_spawn(pal_thread_fn_t fn, void *arg, int32_t pin_cpu, b
     return thread;
 }
 
-lb_status_t pal_thread_join(pal_thread_t *t)
+lb_status_t pal_thread_join_ex(pal_thread_t *t, lb_status_t *pin_status)
 {
     int rc = 0;
 
@@ -203,8 +204,16 @@ lb_status_t pal_thread_join(pal_thread_t *t)
         return LB_STATUS_ERROR;
     }
 
+    if (pin_status != NULL) {
+        *pin_status = t->pin_status;
+    }
     free(t);
     return LB_STATUS_OK;
+}
+
+lb_status_t pal_thread_join(pal_thread_t *t)
+{
+    return pal_thread_join_ex(t, NULL);
 }
 
 /* ------------------------------------------------------ operating-system probes */
@@ -212,6 +221,12 @@ lb_status_t pal_thread_join(pal_thread_t *t)
 #define PAL_OS_SYSCALL_WARMUP 1000u
 #define PAL_OS_SD_MAX_THREADS 7u
 #define PAL_OS_SD_READY_TIMEOUT_NS UINT64_C(1000000000)
+
+#if defined(__APPLE__)
+#define PAL_OS_MAP_ANON MAP_ANON
+#else
+#define PAL_OS_MAP_ANON MAP_ANONYMOUS
+#endif
 
 static volatile sig_atomic_t g_pal_os_sig_count = 0;
 
@@ -669,8 +684,8 @@ lb_status_t pal_os_shootdown(uint32_t iterations, pal_os_shootdown_result_t *out
 {
     const size_t page_size = pal_page_size();
     const uint32_t cpu_count = pal_cpu_count();
-    pal_mem_t *arena = NULL;
-    uint8_t *base = NULL;
+    void *mapping = MAP_FAILED;
+    size_t mapping_size = 0u;
     uint8_t *page = NULL;
     volatile uint8_t *vpage = NULL;
     uint32_t stop = 0u;
@@ -699,16 +714,20 @@ lb_status_t pal_os_shootdown(uint32_t iterations, pal_os_shootdown_result_t *out
         return LB_STATUS_ERROR;
     }
 
-    arena = pal_mem_alloc(page_size * 2u, PAL_MEM_NO_THP);
-    if (arena == NULL) {
+    /*
+     * mprotect() only accepts whole pages. Allocate the probe page with mmap()
+     * directly instead of pal_mem_alloc(), whose malloc() fallback could place
+     * it inside a heap arena and make mprotect() revoke access to unrelated
+     * allocations that share the page.
+     */
+    mapping_size = page_size * 2u;
+    mapping =
+        mmap(NULL, mapping_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | PAL_OS_MAP_ANON, -1, 0);
+    if (mapping == MAP_FAILED) {
         goto cleanup;
     }
-    base = pal_mem_data(arena);
-    if (base == NULL) {
-        goto cleanup;
-    }
-    page =
-        (uint8_t *)(((uintptr_t)base + (uintptr_t)page_size - 1u) & ~((uintptr_t)page_size - 1u));
+    page = (uint8_t *)(((uintptr_t)mapping + (uintptr_t)page_size - 1u) &
+                       ~((uintptr_t)page_size - 1u));
     vpage = page;
     vpage[0] = 0x5au;
     vpage[1] = 0xa5u;
@@ -797,7 +816,9 @@ cleanup:
             threads[i] = NULL;
         }
     }
-    pal_mem_free(arena);
+    if (mapping != MAP_FAILED) {
+        (void)munmap(mapping, mapping_size);
+    }
     return status;
 }
 
@@ -850,11 +871,14 @@ lb_status_t pal_os_sig_roundtrip(uint32_t signals, pal_os_sig_result_t *out)
 {
     struct sigaction action = {0};
     struct sigaction previous = {0};
+    sigset_t sigusr1 = {0};
+    sigset_t previous_mask = {0};
     uint64_t start = 0u;
     uint64_t end = 0u;
     uint32_t i = 0u;
     uint32_t completed = 0u;
     bool installed = false;
+    bool mask_saved = false;
     lb_status_t status = LB_STATUS_ERROR;
 
     if (out == NULL || signals == 0u) {
@@ -874,6 +898,19 @@ lb_status_t pal_os_sig_roundtrip(uint32_t signals, pal_os_sig_result_t *out)
     installed = true;
     g_pal_os_sig_count = 0;
 
+    /*
+     * A caller may have blocked SIGUSR1 for its own purposes. Unblock it for
+     * the duration of the probe so pthread_kill() actually delivers, then put
+     * the original mask back on every exit path.
+     */
+    if (sigemptyset(&sigusr1) != 0 || sigaddset(&sigusr1, SIGUSR1) != 0) {
+        goto cleanup;
+    }
+    if (pthread_sigmask(SIG_UNBLOCK, &sigusr1, &previous_mask) != 0) {
+        goto cleanup;
+    }
+    mask_saved = true;
+
     start = pal_now_ns();
     for (i = 0u; i < signals; i++) {
         if (pthread_kill(pthread_self(), SIGUSR1) != 0) {
@@ -882,6 +919,11 @@ lb_status_t pal_os_sig_roundtrip(uint32_t signals, pal_os_sig_result_t *out)
         completed++;
     }
     end = pal_now_ns();
+
+    if (pthread_sigmask(SIG_SETMASK, &previous_mask, NULL) != 0) {
+        goto cleanup;
+    }
+    mask_saved = false;
 
     if (sigaction(SIGUSR1, &previous, NULL) != 0) {
         goto cleanup;
@@ -896,6 +938,9 @@ lb_status_t pal_os_sig_roundtrip(uint32_t signals, pal_os_sig_result_t *out)
     status = LB_STATUS_OK;
 
 cleanup:
+    if (mask_saved) {
+        (void)pthread_sigmask(SIG_SETMASK, &previous_mask, NULL);
+    }
     if (installed) {
         (void)sigaction(SIGUSR1, &previous, NULL);
     }

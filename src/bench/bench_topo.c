@@ -117,7 +117,7 @@ static void topo_canary_finish(const lb_cfg_t *cfg, uint64_t baseline)
     tty_kv(cfg, "DVFS drift", "%+.1f%%", drift);
 }
 
-static bool topo_join_thread(pal_thread_t **thread)
+static bool topo_join_thread_status(pal_thread_t **thread, lb_status_t *pin_status)
 {
     lb_status_t status = LB_STATUS_OK;
 
@@ -125,12 +125,17 @@ static bool topo_join_thread(pal_thread_t **thread)
         return true;
     }
 
-    status = pal_thread_join(*thread);
+    status = pal_thread_join_ex(*thread, pin_status);
     if (status == LB_STATUS_OK) {
         *thread = NULL;
         return true;
     }
     return false;
+}
+
+static bool topo_join_thread(pal_thread_t **thread)
+{
+    return topo_join_thread_status(thread, NULL);
 }
 
 /* --------------------------------------------------------------- topo atomic */
@@ -325,14 +330,22 @@ static uint32_t topo_fs_estimate_line(const double *samples, size_t count)
  */
 static bool topo_fs_step(topo_fs_ctx_t *ctx_a, topo_fs_ctx_t *ctx_b, uint32_t *ready, uint32_t *go,
                          uint32_t *stop, uint32_t batch_ms, bool pin, uint32_t cpu_a,
-                         uint32_t cpu_b)
+                         uint32_t cpu_b, bool *out_pin_ok)
 {
     const uint64_t timeout_ns = (uint64_t)TOPO_FS_READY_TIMEOUT_MS * UINT64_C(1000000);
     const uint64_t deadline = pal_now_ns() + timeout_ns;
     pal_thread_t *thread_a = NULL;
     pal_thread_t *thread_b = NULL;
+    lb_status_t pin_a = LB_STATUS_OK;
+    lb_status_t pin_b = LB_STATUS_OK;
+    bool joined_a = false;
+    bool joined_b = false;
     bool ready_ok = false;
     bool ok = false;
+
+    if (out_pin_ok != NULL) {
+        *out_pin_ok = true;
+    }
 
     pal_atomic_store_u32_relaxed(ready, 0u);
     pal_atomic_store_u32_relaxed(go, 0u);
@@ -361,8 +374,14 @@ static bool topo_fs_step(topo_fs_ctx_t *ctx_a, topo_fs_ctx_t *ctx_b, uint32_t *r
     }
     pal_atomic_store_u32_relaxed(stop, 1u);
 
-    if (!topo_join_thread(&thread_a) || !topo_join_thread(&thread_b)) {
+    joined_a = topo_join_thread_status(&thread_a, pin ? &pin_a : NULL);
+    joined_b = topo_join_thread_status(&thread_b, pin ? &pin_b : NULL);
+    if (!joined_a || !joined_b) {
         return false;
+    }
+
+    if (out_pin_ok != NULL && pin && (pin_a != LB_STATUS_OK || pin_b != LB_STATUS_OK)) {
+        *out_pin_ok = false;
     }
 
     ok = ready_ok && ctx_a->iterations > 0u && ctx_b->iterations > 0u;
@@ -381,6 +400,8 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
     uint32_t cpu_b = 1u;
     uint32_t batch_ms = 0u;
     bool pin = false;
+    bool pin_warned = false;
+    bool header_printed = false;
     double samples[TOPO_FS_OFFSET_COUNT] = {0.0};
     uint32_t line_bytes = 0u;
     uint64_t baseline = 0u;
@@ -421,15 +442,8 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
     (void)memset(base, 0, TOPO_FS_BUFFER_BYTES);
 
     tty_section(cfg, "Topology false sharing");
-    if (pin) {
-        tty_kv(cfg, "Cores", "%" PRIu32 " and %" PRIu32 " (pinned)", cpu_a, cpu_b);
-    } else {
-        tty_kv(cfg, "Cores", "2 threads, QoS perf (unpinned)");
-    }
     tty_kv(cfg, "Buffer", "%u bytes (page-aligned)", TOPO_FS_BUFFER_BYTES);
     tty_kv(cfg, "Batch", "%" PRIu32 " ms per offset", batch_ms);
-    tty_header(cfg, "  %8s %14s", "Offset", "ns/op");
-    tty_csv_row(cfg, "topo,falseshare,offset_bytes,ns_per_op");
 
     baseline = stats_canary_baseline(TOPO_CANARY_MS);
 
@@ -442,6 +456,7 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
         double ns_a = 0.0;
         double ns_b = 0.0;
         bool step_ok = false;
+        bool step_pin_ok = true;
         uint32_t attempt = 0u;
 
         ctx_a.counter = counter_a;
@@ -462,12 +477,32 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
             *counter_b = 0u;
             ctx_a.iterations = 0u;
             ctx_b.iterations = 0u;
-            step_ok = topo_fs_step(&ctx_a, &ctx_b, &ready, &go, &stop, batch_ms, pin, cpu_a, cpu_b);
+            step_pin_ok = true;
+            step_ok = topo_fs_step(&ctx_a, &ctx_b, &ready, &go, &stop, batch_ms, pin, cpu_a, cpu_b,
+                                   &step_pin_ok);
         }
         if (!step_ok) {
             tty_err("false-sharing workers produced no samples");
             status = LB_STATUS_ERROR;
             goto cleanup;
+        }
+        if (pin && !step_pin_ok && !pin_warned) {
+            tty_warn("CPU pinning was not applied to every false-sharing worker; "
+                     "treating the run as unpinned");
+            pin_warned = true;
+        }
+        if (!header_printed) {
+            if (pin && !pin_warned) {
+                tty_kv(cfg, "Cores", "%" PRIu32 " and %" PRIu32 " (pinned)", cpu_a, cpu_b);
+            } else if (pin) {
+                tty_kv(cfg, "Cores", "%" PRIu32 " and %" PRIu32 " (pin denied, unpinned)", cpu_a,
+                       cpu_b);
+            } else {
+                tty_kv(cfg, "Cores", "2 threads, QoS perf (unpinned)");
+            }
+            tty_header(cfg, "  %8s %14s", "Offset", "ns/op");
+            tty_csv_row(cfg, "topo,falseshare,offset_bytes,ns_per_op");
+            header_printed = true;
         }
 
         ns_a = (double)ctx_a.elapsed_ns / (double)ctx_a.iterations;
@@ -628,7 +663,8 @@ static void topo_pp_worker(void *arg)
 }
 
 static lb_status_t topo_pp_run_pair(uint32_t cpu_a, uint32_t cpu_b, bool qos_a, bool qos_b,
-                                    uint32_t batch_ms, bool cas_mode, bool pin, uint64_t *out_ns)
+                                    uint32_t batch_ms, bool cas_mode, bool pin, bool *pin_warned,
+                                    uint64_t *out_ns)
 {
     pal_mem_t *arena = NULL;
     topo_pp_shared_t *shared = NULL;
@@ -636,6 +672,10 @@ static lb_status_t topo_pp_run_pair(uint32_t cpu_a, uint32_t cpu_b, bool qos_a, 
     topo_pp_ctx_t ctx_b = {0};
     pal_thread_t *thread_a = NULL;
     pal_thread_t *thread_b = NULL;
+    lb_status_t pin_a = LB_STATUS_OK;
+    lb_status_t pin_b = LB_STATUS_OK;
+    bool joined_a = false;
+    bool joined_b = false;
     lb_status_t status = LB_STATUS_ERROR;
     double one_way_ns = 0.0;
 
@@ -680,9 +720,17 @@ static lb_status_t topo_pp_run_pair(uint32_t cpu_a, uint32_t cpu_b, bool qos_a, 
         goto cleanup;
     }
 
-    if (!topo_join_thread(&thread_a) || !topo_join_thread(&thread_b)) {
+    joined_a = topo_join_thread_status(&thread_a, pin ? &pin_a : NULL);
+    joined_b = topo_join_thread_status(&thread_b, pin ? &pin_b : NULL);
+    if (!joined_a || !joined_b) {
         status = LB_STATUS_ERROR;
         goto cleanup;
+    }
+    if (pin && (pin_a != LB_STATUS_OK || pin_b != LB_STATUS_OK) && pin_warned != NULL &&
+        !*pin_warned) {
+        tty_warn("CPU pinning was not applied to every ping-pong worker; "
+                 "latency may include cross-core migration");
+        *pin_warned = true;
     }
     if (ctx_a.rounds == 0u || ctx_a.rtt_sum_ns == 0u) {
         tty_err("ping-pong produced no samples");
@@ -716,7 +764,8 @@ cleanup:
  * budget while letting the minimum discard those one-off stalls.
  */
 static lb_status_t topo_pp_run_pair_best(uint32_t cpu_a, uint32_t cpu_b, bool qos_a, bool qos_b,
-                                         bool cas_mode, bool pin, uint64_t *out_ns)
+                                         bool cas_mode, bool pin, bool *pin_warned,
+                                         uint64_t *out_ns)
 {
     uint64_t best = UINT64_MAX;
     size_t batch = 0u;
@@ -728,7 +777,7 @@ static lb_status_t topo_pp_run_pair_best(uint32_t cpu_a, uint32_t cpu_b, bool qo
     for (batch = 0u; batch < TOPO_PP_BATCH_COUNT; batch++) {
         uint64_t sample_ns = 0u;
         const lb_status_t status = topo_pp_run_pair(cpu_a, cpu_b, qos_a, qos_b, TOPO_PP_BATCH_MS,
-                                                    cas_mode, pin, &sample_ns);
+                                                    cas_mode, pin, pin_warned, &sample_ns);
 
         if (status != LB_STATUS_OK) {
             return status;
@@ -785,6 +834,7 @@ static lb_status_t topo_pp_matrix(const lb_cfg_t *cfg, uint32_t cpu_count, bool 
     size_t pairs = 0u;
     size_t pair_index = 0u;
     size_t i = 0u;
+    bool pin_warned = false;
     lb_status_t status = LB_STATUS_OK;
 
     if (count > max_count) {
@@ -823,7 +873,7 @@ static lb_status_t topo_pp_matrix(const lb_cfg_t *cfg, uint32_t cpu_count, bool 
             uint64_t one_way_ns = 0u;
 
             status = topo_pp_run_pair_best((uint32_t)i, (uint32_t)j, true, true, cas_mode, true,
-                                           &one_way_ns);
+                                           &pin_warned, &one_way_ns);
             if (status != LB_STATUS_OK) {
                 goto cleanup;
             }
@@ -864,7 +914,7 @@ static lb_status_t topo_pp_mac_pairs(const lb_cfg_t *cfg, bool cas_mode)
     for (i = 0u; i < 3u; i++) {
         uint64_t one_way_ns = 0u;
         const lb_status_t status = topo_pp_run_pair_best(0u, 0u, TOPO_PP_QOS_A[i], TOPO_PP_QOS_B[i],
-                                                         cas_mode, false, &one_way_ns);
+                                                         cas_mode, false, NULL, &one_way_ns);
 
         if (status != LB_STATUS_OK) {
             return status;

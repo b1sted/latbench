@@ -190,6 +190,7 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_ilp_int_k1(uint64_t iteration
     uint64_t a0 = UINT64_C(1);
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
         CORE_ILP_INT_STEP(a0);
     }
@@ -204,6 +205,7 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_ilp_int_k2(uint64_t iteration
     uint64_t a1 = UINT64_C(3);
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
         CORE_ILP_INT_STEP(a0);
         CORE_ILP_INT_STEP(a1);
@@ -221,6 +223,7 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_ilp_int_k4(uint64_t iteration
     uint64_t a3 = UINT64_C(7);
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
         CORE_ILP_INT_STEP(a0);
         CORE_ILP_INT_STEP(a1);
@@ -242,6 +245,7 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_ilp_int_k6(uint64_t iteration
     uint64_t a5 = UINT64_C(11);
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
         CORE_ILP_INT_STEP(a0);
         CORE_ILP_INT_STEP(a1);
@@ -267,6 +271,7 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_ilp_int_k8(uint64_t iteration
     uint64_t a7 = UINT64_C(15);
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
         CORE_ILP_INT_STEP(a0);
         CORE_ILP_INT_STEP(a1);
@@ -287,6 +292,7 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_ilp_fp_k1(uint64_t iterations
     double a0 = 1.0;
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
         CORE_ILP_FP_STEP(a0);
     }
@@ -301,6 +307,7 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_ilp_fp_k2(uint64_t iterations
     double a1 = 3.0;
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
         CORE_ILP_FP_STEP(a0);
         CORE_ILP_FP_STEP(a1);
@@ -318,6 +325,7 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_ilp_fp_k4(uint64_t iterations
     double a3 = 7.0;
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
         CORE_ILP_FP_STEP(a0);
         CORE_ILP_FP_STEP(a1);
@@ -339,6 +347,7 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_ilp_fp_k6(uint64_t iterations
     double a5 = 11.0;
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
         CORE_ILP_FP_STEP(a0);
         CORE_ILP_FP_STEP(a1);
@@ -364,6 +373,7 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_ilp_fp_k8(uint64_t iterations
     double a7 = 15.0;
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
         CORE_ILP_FP_STEP(a0);
         CORE_ILP_FP_STEP(a1);
@@ -707,6 +717,7 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t core_align_probe(const uint8_t *bu
     size_t next = offset;
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
         memcpy(&val, buf + next, sizeof(val));
         acc += val;

@@ -331,14 +331,15 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t lb_selftest_branch_walk(const uint
     uint64_t b = UINT64_C(0xbb67ae8584caa73b);
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
         const uint8_t bit = pattern[(size_t)i & (LB_SELFTEST_BRANCH_PATTERN_BYTES - 1u)];
 
         if (bit != 0u) {
-            PAL_BLOCK_IFCONV();
+            PAL_BLOCK_IFCONV_T();
             a = (a + b) ^ (i + UINT64_C(0x2545f4914f6cdd1d));
         } else {
-            PAL_BLOCK_IFCONV();
+            PAL_BLOCK_IFCONV_F();
             b = (b + a) ^ (i + UINT64_C(0x6a09e667f3bcc909));
         }
     }
@@ -408,6 +409,7 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t lb_selftest_ilp_k1(uint64_t iterat
     uint64_t a0 = UINT64_C(1);
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
         a0 = (a0 * LB_SELFTEST_ILP_MUL) + LB_SELFTEST_ILP_ADD;
         PAL_KEEP_INT(a0);
@@ -426,6 +428,7 @@ static PAL_NOINLINE PAL_NO_VECTORIZE uint64_t lb_selftest_ilp_k4(uint64_t iterat
     uint64_t a3 = UINT64_C(7);
     uint64_t i = 0u;
 
+    PAL_NO_VECTORIZE_LOOP
     for (i = 0u; i < iterations; i++) {
         a0 = (a0 * LB_SELFTEST_ILP_MUL) + LB_SELFTEST_ILP_ADD;
         a1 = (a1 * LB_SELFTEST_ILP_MUL) + LB_SELFTEST_ILP_ADD;
