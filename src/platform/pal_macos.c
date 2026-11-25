@@ -18,28 +18,35 @@
 #include "pal/pal.h"
 #include "pal_internal.h"
 
+static mach_timebase_info_data_t g_pal_macos_timebase = {1u, 1u};
+static pthread_once_t g_pal_macos_timebase_once = PTHREAD_ONCE_INIT;
+
+static void pal_macos_timebase_init(void)
+{
+    if (mach_timebase_info(&g_pal_macos_timebase) != KERN_SUCCESS ||
+        g_pal_macos_timebase.denom == 0u) {
+        g_pal_macos_timebase.numer = 1u;
+        g_pal_macos_timebase.denom = 1u;
+    }
+}
+
 uint64_t pal_now_ns(void)
 {
-    /*
-     * mach_timebase_info is immutable after the first successful fill. The
-     * unsynchronized lazy initialization races only on an identical value.
-     */
-    static mach_timebase_info_data_t timebase = {0u, 0u};
     const uint64_t ticks = mach_absolute_time();
     uint64_t numer = 0u;
     uint64_t denom = 0u;
     uint64_t quotient = 0u;
     uint64_t remainder = 0u;
 
-    if (timebase.denom == 0u) {
-        if (mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.denom == 0u) {
-            timebase.numer = 1u;
-            timebase.denom = 1u;
-        }
-    }
+    /*
+     * mach_timebase_info is immutable after the first successful fill, but the
+     * lazy initialization must be thread-safe: "topo" and "os shootdown" call
+     * pal_now_ns() from several freshly spawned threads at once.
+     */
+    (void)pthread_once(&g_pal_macos_timebase_once, pal_macos_timebase_init);
 
-    numer = (uint64_t)timebase.numer;
-    denom = (uint64_t)timebase.denom;
+    numer = (uint64_t)g_pal_macos_timebase.numer;
+    denom = (uint64_t)g_pal_macos_timebase.denom;
 
     /* Split the conversion to avoid overflowing ticks * numer. */
     quotient = ticks / denom;
