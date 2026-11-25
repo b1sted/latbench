@@ -1,9 +1,16 @@
 /* SPDX-License-Identifier: GPL-3.0 */
 
+/* NOLINTBEGIN(bugprone-reserved-identifier, readability-identifier-naming) */
+#define _POSIX_C_SOURCE 200809L
+/* NOLINTEND(bugprone-reserved-identifier, readability-identifier-naming) */
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+
+#include <pthread.h>
+#include <signal.h>
 
 #include "pal/compiler.h"
 #include "pal/pal.h"
@@ -211,6 +218,22 @@ static void test_thread_pinned(void)
     }
 }
 
+static void test_thread_pin_status(void)
+{
+    pal_test_thread_arg_t ctx = {0u, 0u};
+    lb_status_t pin_status = LB_STATUS_OK;
+    pal_thread_t *thread = pal_thread_spawn(pal_test_thread_main, &ctx, INT32_MAX, false);
+
+    check_true(thread != NULL, "pal_thread_spawn accepts an impossible pin request");
+    if (thread == NULL) {
+        return;
+    }
+    check_true(pal_thread_join_ex(thread, &pin_status) == LB_STATUS_OK,
+               "pal_thread_join_ex completes");
+    check_true(ctx.seen != 0u, "thread with a rejected pin still runs");
+    check_true(pin_status != LB_STATUS_OK, "pal_thread_join_ex reports a rejected pin");
+}
+
 static void test_atomics(void)
 {
     uint32_t value = 0u;
@@ -317,6 +340,31 @@ static void test_os_sig(void)
     check_true(result.elapsed_ns > 0u, "pal_os_sig_roundtrip measures a nonzero duration");
 }
 
+static void test_os_sig_blocked(void)
+{
+    pal_os_sig_result_t result = {0};
+    sigset_t sigusr1 = {0};
+    sigset_t previous = {0};
+
+    if (sigemptyset(&sigusr1) != 0 || sigaddset(&sigusr1, SIGUSR1) != 0) {
+        check_true(false, "cannot build a SIGUSR1 signal set");
+        return;
+    }
+    if (pthread_sigmask(SIG_BLOCK, &sigusr1, &previous) != 0) {
+        printf("SKIP: cannot block SIGUSR1 in the test thread\n");
+        return;
+    }
+
+    check_true(pal_os_sig_roundtrip(8u, &result) == LB_STATUS_OK,
+               "pal_os_sig_roundtrip unblocks SIGUSR1 internally");
+    check_true(result.signals == 8u,
+               "pal_os_sig_roundtrip delivers while the caller had SIGUSR1 blocked");
+    check_true(result.elapsed_ns > 0u, "blocked-caller round trip is still timed");
+
+    check_true(pthread_sigmask(SIG_SETMASK, &previous, NULL) == 0,
+               "test restores its original signal mask");
+}
+
 static void test_os_sleep(void)
 {
     uint64_t samples[3] = {0u, 0u, 0u};
@@ -375,6 +423,7 @@ int main(void)
     test_qos();
     test_thread_lifecycle();
     test_thread_pinned();
+    test_thread_pin_status();
     test_atomics();
     test_os_syscall();
     test_os_ctx_thread();
@@ -383,6 +432,7 @@ int main(void)
     test_os_shootdown();
     test_os_fork();
     test_os_sig();
+    test_os_sig_blocked();
     test_os_sleep();
     test_compiler_primitives();
 
