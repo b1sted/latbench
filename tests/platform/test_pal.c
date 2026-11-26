@@ -168,6 +168,49 @@ static void test_cpu_and_pinning(void)
                "pal_pin_cpu(-1) is rejected");
 }
 
+static void test_cpu_list(void)
+{
+    int32_t cpus[64] = {0};
+    int32_t single[2] = {-1, -1};
+    size_t count = 123u;
+    size_t i = 0u;
+    bool ascending = true;
+    bool nonnegative = true;
+
+    check_true(pal_cpu_list(NULL, 64u, &count) == LB_STATUS_INVALID_ARG,
+               "pal_cpu_list rejects NULL cpus");
+    check_true(count == 0u, "pal_cpu_list zeroes out_count when cpus is NULL");
+
+    count = 123u;
+    check_true(pal_cpu_list(cpus, 0u, &count) == LB_STATUS_INVALID_ARG,
+               "pal_cpu_list rejects zero capacity");
+    check_true(count == 0u, "pal_cpu_list zeroes out_count when capacity is zero");
+
+    check_true(pal_cpu_list(cpus, 64u, NULL) == LB_STATUS_INVALID_ARG,
+               "pal_cpu_list rejects NULL out_count");
+
+    count = 0u;
+    check_true(pal_cpu_list(cpus, 64u, &count) == LB_STATUS_OK, "pal_cpu_list reports CPUs");
+    check_true(count >= 1u && count <= 64u, "pal_cpu_list returns a bounded CPU count");
+    for (i = 0u; i < count; i++) {
+        if (cpus[i] < 0) {
+            nonnegative = false;
+        }
+        if (i > 0u && cpus[i] <= cpus[i - 1u]) {
+            ascending = false;
+        }
+    }
+    check_true(nonnegative, "pal_cpu_list reports non-negative CPU IDs");
+    check_true(ascending, "pal_cpu_list reports CPU IDs in strictly ascending order");
+
+    count = 0u;
+    check_true(pal_cpu_list(single, 1u, &count) == LB_STATUS_OK,
+               "pal_cpu_list accepts a single-slot buffer");
+    check_true(count == 1u, "pal_cpu_list honors a one-CPU capacity");
+    check_true(single[0] >= 0, "pal_cpu_list fills the single CPU slot");
+    check_true(single[1] == -1, "pal_cpu_list writes only within capacity");
+}
+
 static void test_qos(void)
 {
     const lb_status_t high = pal_set_qos(true);
@@ -420,6 +463,7 @@ int main(void)
     test_mem_odd_size();
     test_arch_name();
     test_cpu_and_pinning();
+    test_cpu_list();
     test_qos();
     test_thread_lifecycle();
     test_thread_pinned();

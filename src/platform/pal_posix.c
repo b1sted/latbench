@@ -1045,6 +1045,29 @@ uint32_t pal_cpu_count(void)
     return (uint32_t)count;
 }
 
+lb_status_t pal_cpu_list(int32_t *cpus, size_t capacity, size_t *out_count)
+{
+    size_t count = 0u;
+    size_t i = 0u;
+
+    if (out_count != NULL) {
+        *out_count = 0u;
+    }
+    if (cpus == NULL || capacity == 0u || out_count == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    count = (size_t)pal_cpu_count();
+    if (count > capacity) {
+        count = capacity;
+    }
+    for (i = 0u; i < count; i++) {
+        cpus[i] = (int32_t)i;
+    }
+    *out_count = count;
+    return LB_STATUS_OK;
+}
+
 lb_status_t pal_pin_cpu(int32_t cpu_id)
 {
     (void)cpu_id;
