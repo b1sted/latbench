@@ -37,6 +37,7 @@ typedef struct lb_cfg_t {
     bool write;                   /* --write: modify words during the memory-size walk */
     bool throttle_long;           /* --long: extend sys throttle from 5 s to 10 s */
     bool topo_pingpong_cas;       /* --mode cas: CAS token handoff for topo pingpong */
+    bool selftest_no_timing;      /* --no-timing: skip hardware ratio checks in selftest */
     bool fast;                    /* compact probe mode used by "auto" */
     bool auto_mode;               /* internal: collect a passport, hide probe detail */
     bool quiet;                   /* internal: suppress all informational output */

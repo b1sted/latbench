@@ -29,7 +29,7 @@ jobs:
       homebrew_tap: b1sted/homebrew-tap
       packages_dispatch_repo: b1sted/packages.basted.dev
       enable_cross_tests: true
-      cross_test_args: selftest
+      cross_test_args: selftest --no-timing
     secrets:
       GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
       GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
