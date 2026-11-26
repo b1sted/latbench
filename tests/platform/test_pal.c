@@ -141,6 +141,48 @@ static void test_mem_odd_size(void)
     }
 }
 
+static void test_thp(void)
+{
+    const lb_thp_mode_t mode = pal_thp_mode();
+    const size_t size = 4u * 1024u * 1024u;
+    pal_mem_t *mem = NULL;
+    pal_mem_t *plain = NULL;
+
+    check_true(mode == LB_THP_UNSUPPORTED || mode == LB_THP_ALWAYS || mode == LB_THP_MADVISE ||
+                   mode == LB_THP_NEVER,
+               "pal_thp_mode returns a valid policy");
+    check_true(!pal_mem_is_thp(NULL), "pal_mem_is_thp(NULL) is false");
+
+    mem = pal_mem_alloc(size, PAL_MEM_THP);
+    check_true(mem != NULL, "pal_mem_alloc(THP) returns a 4 MiB arena");
+    if (mem != NULL) {
+        unsigned char *data = pal_mem_data(mem);
+
+        check_true(data != NULL, "THP arena exposes storage");
+        if (data != NULL) {
+            data[0] = (unsigned char)0x5au;
+            data[size - 1u] = (unsigned char)0xa5u;
+            check_true(data[0] == (unsigned char)0x5au && data[size - 1u] == (unsigned char)0xa5u,
+                       "THP arena storage is writable end to end");
+        }
+        if (mode == LB_THP_NEVER || mode == LB_THP_UNSUPPORTED) {
+            check_true(!pal_mem_is_thp(mem), "THP arena is not huge-page backed when disabled");
+        }
+        if (pal_mem_is_thp(mem)) {
+            check_true(mode == LB_THP_ALWAYS || mode == LB_THP_MADVISE,
+                       "pal_mem_is_thp agrees with the active THP policy");
+        }
+        pal_mem_free(mem);
+    }
+
+    plain = pal_mem_alloc(size, PAL_MEM_NO_THP);
+    check_true(plain != NULL, "pal_mem_alloc(NO_THP) returns a 4 MiB arena");
+    if (plain != NULL) {
+        check_true(!pal_mem_is_thp(plain), "NO_THP arena is not huge-page backed");
+        pal_mem_free(plain);
+    }
+}
+
 static void test_arch_name(void)
 {
     const char *arch = pal_arch_name();
@@ -461,6 +503,7 @@ int main(void)
     test_mem_alloc_ok(PAL_MEM_NO_THP, "pal_mem_alloc(NO_THP) returns a handle");
     test_mem_alloc_ok(PAL_MEM_THP, "pal_mem_alloc(THP) returns a handle");
     test_mem_odd_size();
+    test_thp();
     test_arch_name();
     test_cpu_and_pinning();
     test_cpu_list();

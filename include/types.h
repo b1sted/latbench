@@ -16,6 +16,14 @@ typedef enum lb_status_t {
     LB_STATUS_UNSUPPORTED = 5
 } lb_status_t;
 
+/* Transparent huge page policy reported by the kernel. */
+typedef enum lb_thp_mode_t {
+    LB_THP_UNSUPPORTED = 0,
+    LB_THP_ALWAYS = 1,
+    LB_THP_MADVISE = 2,
+    LB_THP_NEVER = 3
+} lb_thp_mode_t;
+
 /* Context-switch probe selection for "os ctx". */
 typedef enum lb_os_ctx_mode_t {
     LB_OS_CTX_BOTH = 0,

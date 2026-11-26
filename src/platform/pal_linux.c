@@ -15,7 +15,9 @@
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #include <sched.h>
@@ -40,24 +42,38 @@
 #define MADV_NOHUGEPAGE 15
 #endif
 
-static void pal_linux_apply_thp(void *base, size_t size, uint32_t flags)
+static bool pal_linux_apply_thp(void *base, size_t size, uint32_t flags)
 {
-    int advice = 0;
+    const size_t thp_align = (size_t)2u * 1024u * 1024u;
+    const bool want_thp = ((flags & PAL_MEM_THP) != 0u) && ((flags & PAL_MEM_NO_THP) == 0u);
+    int rc = 0;
+    lb_thp_mode_t mode = LB_THP_UNSUPPORTED;
 
     if ((flags & PAL_MEM_NO_THP) != 0u) {
-        advice = MADV_NOHUGEPAGE;
-    } else if ((flags & PAL_MEM_THP) != 0u) {
-        advice = MADV_HUGEPAGE;
+        (void)madvise(base, size, MADV_NOHUGEPAGE);
+        return false;
+    }
+    if (!want_thp) {
+        return false;
     }
 
-    if (advice != 0) {
-        if (madvise(base, size, advice) != 0) {
-            /*
-             * Best-effort: old kernels and some Android configurations reject
-             * the advice with EINVAL/ENOSYS. The mapping stays usable.
-             */
-        }
+    /*
+     * Best-effort: old kernels and some Android configurations reject the
+     * advice with EINVAL/ENOSYS. The mapping stays usable either way.
+     */
+    rc = madvise(base, size, MADV_HUGEPAGE);
+    if (size < thp_align) {
+        return false;
     }
+    if (((uintptr_t)base & ((uintptr_t)thp_align - 1u)) != 0u) {
+        return false;
+    }
+
+    mode = pal_thp_mode();
+    if (mode == LB_THP_ALWAYS) {
+        return true;
+    }
+    return mode == LB_THP_MADVISE && rc == 0;
 }
 
 uint64_t pal_now_ns(void)
@@ -205,12 +221,36 @@ bool pal_ilp_scaling_expected(void)
 #endif
 }
 
+lb_thp_mode_t pal_thp_mode(void)
+{
+    FILE *file = fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r");
+    char line[256];
+    lb_thp_mode_t mode = LB_THP_UNSUPPORTED;
+
+    if (file == NULL) {
+        return LB_THP_UNSUPPORTED;
+    }
+    if (fgets(line, (int)sizeof(line), file) != NULL) {
+        if (strstr(line, "[always]") != NULL) {
+            mode = LB_THP_ALWAYS;
+        } else if (strstr(line, "[madvise]") != NULL) {
+            mode = LB_THP_MADVISE;
+        } else if (strstr(line, "[never]") != NULL) {
+            mode = LB_THP_NEVER;
+        }
+    }
+    (void)fclose(file);
+    return mode;
+}
+
 pal_mem_t *pal_mem_alloc(size_t size, uint32_t flags)
 {
     pal_mem_t *mem = NULL;
     void *base = NULL;
     size_t mapped_size = 0u;
     const size_t page = pal_page_size();
+    const size_t thp_align = (size_t)2u * 1024u * 1024u;
+    const bool want_thp = ((flags & PAL_MEM_THP) != 0u) && ((flags & PAL_MEM_NO_THP) == 0u);
 
     if (size == 0u) {
         return NULL;
@@ -220,12 +260,40 @@ pal_mem_t *pal_mem_alloc(size_t size, uint32_t flags)
     }
     mapped_size = ((size + page - 1u) / page) * page;
 
-    base = mmap(NULL, mapped_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (base == MAP_FAILED) {
-        mapped_size = 0u;
-        base = malloc(size);
-        if (base == NULL) {
-            goto cleanup;
+    /*
+     * Transparent huge pages only apply to aligned ranges. Over-map by one
+     * huge-page-sized window, trim the unaligned prefix and suffix, and keep
+     * the interior mapping so base is 2 MiB aligned.
+     */
+    if (want_thp && mapped_size >= thp_align && mapped_size <= (SIZE_MAX - thp_align)) {
+        const size_t over_size = mapped_size + thp_align;
+        void *raw =
+            mmap(NULL, over_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+        if (raw != MAP_FAILED) {
+            const uintptr_t align_mask = (uintptr_t)(thp_align - 1u);
+            const uintptr_t aligned_addr = ((uintptr_t)raw + align_mask) & ~align_mask;
+            const size_t prefix = (size_t)(aligned_addr - (uintptr_t)raw);
+            const size_t suffix = over_size - prefix - mapped_size;
+
+            if (prefix > 0u) {
+                (void)munmap(raw, prefix);
+            }
+            if (suffix > 0u) {
+                (void)munmap((void *)(aligned_addr + (uintptr_t)mapped_size), suffix);
+            }
+            base = (void *)aligned_addr;
+        }
+    }
+
+    if (base == NULL) {
+        base = mmap(NULL, mapped_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (base == MAP_FAILED) {
+            mapped_size = 0u;
+            base = malloc(size);
+            if (base == NULL) {
+                goto cleanup;
+            }
         }
     }
 
@@ -237,9 +305,10 @@ pal_mem_t *pal_mem_alloc(size_t size, uint32_t flags)
     mem->base = base;
     mem->mapped_size = mapped_size;
     mem->size = size;
+    mem->thp_active = false;
 
     if (mapped_size > 0u) {
-        pal_linux_apply_thp(base, mapped_size, flags);
+        mem->thp_active = pal_linux_apply_thp(base, mapped_size, flags);
     }
 
     return mem;

@@ -43,6 +43,12 @@ bool pal_is_tty(bool use_stderr);
 /* System page size in bytes. */
 size_t pal_page_size(void);
 
+/*
+ * Transparent huge page policy configured for the system. Platforms without
+ * transparent huge pages report LB_THP_UNSUPPORTED.
+ */
+lb_thp_mode_t pal_thp_mode(void);
+
 /* Total physical RAM in bytes, or 0 when the platform cannot report it. */
 uint64_t pal_total_ram_bytes(void);
 
@@ -127,6 +133,12 @@ void *pal_mem_data(const pal_mem_t *mem);
 
 /* Return the requested arena size in bytes, or 0 when mem is NULL. */
 size_t pal_mem_size(const pal_mem_t *mem);
+
+/*
+ * True when the arena is backed by transparent huge pages. Always false when
+ * mem is NULL or the platform has no transparent huge page support.
+ */
+bool pal_mem_is_thp(const pal_mem_t *mem);
 
 /* Release an arena. Safe to call with NULL. */
 void pal_mem_free(pal_mem_t *mem);
