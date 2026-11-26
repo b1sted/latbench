@@ -474,6 +474,53 @@ static void test_os_sleep(void)
                "pal_os_sleep_us rejects a capacity smaller than the sample count");
 }
 
+static void test_os_swap(void)
+{
+    uint64_t samples[64] = {0u};
+    pal_os_swap_result_t result = {0};
+    size_t count = 99u;
+    lb_status_t status = LB_STATUS_ERROR;
+
+    check_true(pal_os_swap_probe(0u, samples, 64u, &count, &result) == LB_STATUS_INVALID_ARG,
+               "pal_os_swap_probe rejects zero pages");
+    check_true(count == 0u, "pal_os_swap_probe zeroes out_count on invalid args");
+
+    count = 99u;
+    check_true(pal_os_swap_probe(64u, NULL, 64u, &count, &result) == LB_STATUS_INVALID_ARG,
+               "pal_os_swap_probe rejects NULL samples");
+
+    count = 99u;
+    check_true(pal_os_swap_probe(64u, samples, 32u, &count, &result) == LB_STATUS_INVALID_ARG,
+               "pal_os_swap_probe rejects capacity below max_pages");
+
+    count = 99u;
+    check_true(pal_os_swap_probe(64u, samples, 64u, NULL, &result) == LB_STATUS_INVALID_ARG,
+               "pal_os_swap_probe rejects NULL out_count");
+    check_true(pal_os_swap_probe(64u, samples, 64u, &count, NULL) == LB_STATUS_INVALID_ARG,
+               "pal_os_swap_probe rejects NULL out");
+
+    count = 0u;
+    status = pal_os_swap_probe(64u, samples, 64u, &count, &result);
+    check_true(status == LB_STATUS_OK || status == LB_STATUS_UNSUPPORTED,
+               "pal_os_swap_probe succeeds or reports unsupported");
+    if (status == LB_STATUS_OK) {
+        bool nonzero = true;
+        size_t i = 0u;
+
+        check_true(count > 0u, "pal_os_swap_probe reports at least one page");
+        check_true(result.pages == (uint64_t)count, "pal_os_swap_probe pages matches out_count");
+        check_true(result.elapsed_ns > 0u, "pal_os_swap_probe measures a nonzero duration");
+        for (i = 0u; i < count; i++) {
+            if (samples[i] == 0u) {
+                nonzero = false;
+            }
+        }
+        check_true(nonzero, "pal_os_swap_probe records per-page samples");
+    } else {
+        printf("SKIP: swap-in latency probe is unsupported on this host\n");
+    }
+}
+
 static void test_compiler_primitives(void)
 {
     const uint32_t values[4] = {1u, 2u, 3u, 4u};
@@ -521,6 +568,7 @@ int main(void)
     test_os_sig();
     test_os_sig_blocked();
     test_os_sleep();
+    test_os_swap();
     test_compiler_primitives();
 
     printf("test_pal: %d checks, %d failures\n", g_checks, g_failures);

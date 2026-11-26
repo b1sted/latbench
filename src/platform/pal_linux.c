@@ -22,9 +22,12 @@
 
 #include <sched.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
+#include "pal/compiler.h"
 #include "pal/pal.h"
+#include "pal/pal_os.h"
 #include "pal_internal.h"
 
 #ifndef MAP_ANONYMOUS
@@ -40,6 +43,9 @@
 #endif
 #ifndef MADV_NOHUGEPAGE
 #define MADV_NOHUGEPAGE 15
+#endif
+#ifndef MADV_PAGEOUT
+#define MADV_PAGEOUT 21
 #endif
 
 static bool pal_linux_apply_thp(void *base, size_t size, uint32_t flags)
@@ -320,4 +326,295 @@ cleanup:
         free(base);
     }
     return NULL;
+}
+
+/* --------------------------------------------------------- swap-in probe */
+
+static bool pal_linux_is_space(char ch)
+{
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\v' || ch == '\f';
+}
+
+/*
+ * Extract the Size and Used columns from one /proc/swaps row. The first two
+ * columns are the filename and type, so only fields 3 and 4 are numeric.
+ */
+static bool pal_linux_swap_fields(const char *line, uint64_t *size_kib, uint64_t *used_kib)
+{
+    const char *cursor = line;
+    uint32_t field = 0u;
+    bool have_size = false;
+    bool have_used = false;
+
+    while (*cursor != '\0') {
+        char *end = NULL;
+        unsigned long long value = 0u;
+
+        while (*cursor != '\0' && pal_linux_is_space(*cursor)) {
+            cursor++;
+        }
+        if (*cursor == '\0') {
+            break;
+        }
+
+        field++;
+        value = strtoull(cursor, &end, 10);
+        if (end == cursor) {
+            while (*cursor != '\0' && !pal_linux_is_space(*cursor)) {
+                cursor++;
+            }
+            continue;
+        }
+        if (field == 3u) {
+            *size_kib = (uint64_t)value;
+            have_size = true;
+        } else if (field == 4u) {
+            *used_kib = (uint64_t)value;
+            have_used = true;
+        }
+        cursor = end;
+    }
+    return have_size && have_used;
+}
+
+static lb_status_t pal_linux_swap_free_kib(uint64_t *out_free_kib)
+{
+    FILE *file = fopen("/proc/swaps", "r");
+    char line[512];
+    uint64_t free_kib = 0u;
+    bool saw_entry = false;
+
+    if (file == NULL) {
+        return LB_STATUS_UNSUPPORTED;
+    }
+    if (fgets(line, (int)sizeof(line), file) == NULL) {
+        (void)fclose(file);
+        return LB_STATUS_UNSUPPORTED;
+    }
+
+    while (fgets(line, (int)sizeof(line), file) != NULL) {
+        uint64_t size_kib = 0u;
+        uint64_t used_kib = 0u;
+
+        if (!pal_linux_swap_fields(line, &size_kib, &used_kib)) {
+            continue;
+        }
+        saw_entry = true;
+        if (size_kib > used_kib) {
+            const uint64_t delta = size_kib - used_kib;
+
+            if (free_kib > (UINT64_MAX - delta)) {
+                free_kib = UINT64_MAX;
+            } else {
+                free_kib += delta;
+            }
+        }
+    }
+    (void)fclose(file);
+
+    if (!saw_entry || free_kib == 0u) {
+        return LB_STATUS_UNSUPPORTED;
+    }
+    *out_free_kib = free_kib;
+    return LB_STATUS_OK;
+}
+
+static uint64_t pal_linux_xorshift64(uint64_t *state)
+{
+    uint64_t value = *state;
+
+    value ^= value >> 12;
+    value ^= value << 25;
+    value ^= value >> 27;
+    *state = value;
+    return value * UINT64_C(2685821657736338717);
+}
+
+static void pal_linux_swap_seed(uint64_t *state, const void *base)
+{
+    *state = pal_now_ns() ^ (uint64_t)(uintptr_t)base ^ UINT64_C(0x9e3779b97f4a7c15);
+    if (*state == 0u) {
+        *state = UINT64_C(0x9e3779b97f4a7c15);
+    }
+}
+
+static void pal_linux_swap_fill(void *base, size_t actual_pages, size_t page_size, uint64_t *state)
+{
+    uint64_t *words = base;
+    const size_t words_per_page = page_size / sizeof(*words);
+    const size_t word_count = actual_pages * words_per_page;
+    const size_t tail_bytes = page_size % sizeof(uint64_t);
+    size_t i = 0u;
+
+    /*
+     * Zero pages are not paged out and zram compresses repeated words, so every
+     * word and every trailing byte gets a nonzero pseudo-random value.
+     */
+    for (i = 0u; i < word_count; i++) {
+        uint64_t value = pal_linux_xorshift64(state);
+
+        if (value == 0u) {
+            value = UINT64_C(0x9e3779b97f4a7c15);
+        }
+        words[i] = value;
+    }
+
+    if (tail_bytes > 0u) {
+        unsigned char *bytes = base;
+        const size_t tail_offset = words_per_page * sizeof(uint64_t);
+        size_t page = 0u;
+
+        for (page = 0u; page < actual_pages; page++) {
+            size_t tail = 0u;
+
+            for (tail = 0u; tail < tail_bytes; tail++) {
+                const uint64_t value = pal_linux_xorshift64(state);
+
+                bytes[page * page_size + tail_offset + tail] = (unsigned char)(value | 1u);
+            }
+        }
+    }
+}
+
+lb_status_t pal_os_swap_probe(size_t max_pages, uint64_t *samples_ns, size_t capacity,
+                              size_t *out_count, pal_os_swap_result_t *out)
+{
+    const size_t page_size = pal_page_size();
+    void *base = MAP_FAILED;
+    size_t *order = NULL;
+    struct rusage ru_before = {0};
+    struct rusage ru_after = {0};
+    uint64_t swap_free_kib = 0u;
+    uint64_t limit_pages = 0u;
+    uint64_t state = 0u;
+    uint64_t acc = 0u;
+    uint64_t total_start = 0u;
+    uint64_t total_end = 0u;
+    size_t actual_pages = 0u;
+    size_t base_size = 0u;
+    size_t i = 0u;
+    lb_status_t status = LB_STATUS_ERROR;
+
+    if (out_count != NULL) {
+        *out_count = 0u;
+    }
+    if (out != NULL) {
+        out->elapsed_ns = 0u;
+        out->pages = 0u;
+        out->major_faults = 0u;
+        out->minor_faults = 0u;
+        out->swap_free_kib = 0u;
+    }
+    if (max_pages == 0u || samples_ns == NULL || out_count == NULL || out == NULL ||
+        capacity < max_pages) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    status = pal_linux_swap_free_kib(&swap_free_kib);
+    if (status != LB_STATUS_OK) {
+        return status;
+    }
+    if (page_size < 1024u) {
+        return LB_STATUS_UNSUPPORTED;
+    }
+
+    /* Never use more than 25% of free swap or the automatic memory budget. */
+    if (swap_free_kib > (UINT64_MAX / 1024u)) {
+        limit_pages = UINT64_MAX / (uint64_t)page_size;
+    } else {
+        const uint64_t swap_bytes = (swap_free_kib / 4u) * 1024u;
+
+        limit_pages = swap_bytes / (uint64_t)page_size;
+    }
+    if (limit_pages > (pal_safe_max_mem_bytes(0u) / (uint64_t)page_size)) {
+        limit_pages = pal_safe_max_mem_bytes(0u) / (uint64_t)page_size;
+    }
+    if ((uint64_t)max_pages < limit_pages) {
+        limit_pages = (uint64_t)max_pages;
+    }
+    if (limit_pages == 0u) {
+        return LB_STATUS_UNSUPPORTED;
+    }
+    if (limit_pages > (uint64_t)(SIZE_MAX / page_size)) {
+        return LB_STATUS_UNSUPPORTED;
+    }
+    actual_pages = (size_t)limit_pages;
+    base_size = actual_pages * page_size;
+
+    base = mmap(NULL, base_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED) {
+        goto cleanup;
+    }
+    order = malloc(actual_pages * sizeof(*order));
+    if (order == NULL) {
+        goto cleanup;
+    }
+
+    /* Build an identity order, then shuffle it with a single-cycle Sattolo pass. */
+    for (i = 0u; i < actual_pages; i++) {
+        order[i] = i;
+    }
+    pal_linux_swap_seed(&state, base);
+    for (i = actual_pages; i > 1u; i--) {
+        const size_t target = (size_t)(pal_linux_xorshift64(&state) % (uint64_t)i);
+        const size_t saved = order[i - 1u];
+
+        order[i - 1u] = order[target];
+        order[target] = saved;
+    }
+
+    pal_linux_swap_fill(base, actual_pages, page_size, &state);
+
+    if (madvise(base, base_size, MADV_PAGEOUT) != 0) {
+        if (errno == EINVAL || errno == ENOSYS || errno == EPERM) {
+            status = LB_STATUS_UNSUPPORTED;
+        } else {
+            status = LB_STATUS_ERROR;
+        }
+        goto cleanup;
+    }
+    if (getrusage(RUSAGE_SELF, &ru_before) != 0) {
+        goto cleanup;
+    }
+
+    {
+        const volatile unsigned char *view = base;
+
+        total_start = pal_now_ns();
+        for (i = 0u; i < actual_pages; i++) {
+            const size_t idx = order[i];
+            const size_t offset = idx * page_size + ((idx * 64u) % page_size);
+            uint64_t start = pal_now_ns();
+            uint64_t end = 0u;
+
+            acc += (uint64_t)view[offset];
+            end = pal_now_ns();
+            samples_ns[i] = (end >= start) ? (end - start) : 0u;
+            PAL_KEEP_INT(acc);
+        }
+        total_end = pal_now_ns();
+    }
+
+    if (getrusage(RUSAGE_SELF, &ru_after) != 0) {
+        goto cleanup;
+    }
+
+    out->elapsed_ns = (total_end >= total_start) ? (total_end - total_start) : 0u;
+    out->pages = (uint64_t)actual_pages;
+    out->major_faults = (ru_after.ru_majflt >= ru_before.ru_majflt)
+                            ? (uint64_t)(ru_after.ru_majflt - ru_before.ru_majflt)
+                            : 0u;
+    out->minor_faults = (ru_after.ru_minflt >= ru_before.ru_minflt)
+                            ? (uint64_t)(ru_after.ru_minflt - ru_before.ru_minflt)
+                            : 0u;
+    out->swap_free_kib = swap_free_kib;
+    *out_count = actual_pages;
+    status = LB_STATUS_OK;
+
+cleanup:
+    free(order);
+    if (base != MAP_FAILED) {
+        (void)munmap(base, base_size);
+    }
+    return status;
 }
