@@ -318,6 +318,10 @@ static bool lb_selftest_chase_check(const lb_cfg_t *cfg)
                (double)best_one / 1.0e6, base_hops, (double)best_two / 1.0e6,
                base_hops * UINT64_C(2), ratio);
 
+    if (cfg->selftest_no_timing) {
+        tty_header(cfg, "  Pointer chase: timing threshold skipped (--no-timing)");
+        return true;
+    }
     if (ratio < LB_SELFTEST_RATIO_MIN) {
         tty_err("selftest: pointer-chase ratio %.2fx is below %.1fx (hot loop folded?)", ratio,
                 LB_SELFTEST_RATIO_MIN);
@@ -398,6 +402,10 @@ static bool lb_selftest_branch_check(const lb_cfg_t *cfg)
     tty_header(cfg, "  Branch pattern: const %.3f ms, 50/50 %.3f ms, ratio %.2fx", const_ns / 1.0e6,
                random_ns / 1.0e6, ratio);
 
+    if (cfg->selftest_no_timing) {
+        tty_header(cfg, "  Branch pattern: timing threshold skipped (--no-timing)");
+        return true;
+    }
     if (ratio < LB_SELFTEST_BRANCH_RATIO_MIN) {
         tty_err("selftest: branch ratio %.2fx is below %.1fx (cmov/csel conversion?)", ratio,
                 LB_SELFTEST_BRANCH_RATIO_MIN);
@@ -487,6 +495,10 @@ static bool lb_selftest_ilp_check(const lb_cfg_t *cfg)
     tty_header(cfg, "  Core ILP: K=1 %.1f Mops/s, K=%u %.1f Mops/s, gain %.2fx", rate_one / 1.0e6,
                LB_SELFTEST_ILP_CHAINS, rate_four / 1.0e6, gain);
 
+    if (cfg->selftest_no_timing) {
+        tty_header(cfg, "  Core ILP: timing threshold skipped (--no-timing)");
+        return true;
+    }
     if (gain < LB_SELFTEST_ILP_GAIN_MIN) {
         if (!pal_ilp_scaling_expected()) {
             tty_header(cfg, "  Core ILP: no parallel scaling expected on this in-order core");
@@ -629,6 +641,7 @@ static void print_help(const lb_cfg_t *cfg)
     help_line(cfg, "--write", "modify words during mem size walk (dirty write-back)");
     help_line(cfg, "--long", "extend sys throttle duration to 10 seconds");
     help_line(cfg, "--mode <mode>", "handoff/switch mode (cas|flag, thread|proc)");
+    help_line(cfg, "--no-timing", "skip selftest ratio thresholds (for emulators)");
     help_line(cfg, "--csv", "emit CSV to stdout; diagnostics to stderr");
     help_line(cfg, "--no-color", "disable color output");
     help_line(cfg, "-h, --help", "display this help and exit");
@@ -682,6 +695,8 @@ static void print_command_help(const lb_cfg_t *cfg, const char *command)
     help_line(cfg, "--cpu <id>", "pin worker to logical CPU <id>");
     if (is_auto) {
         help_line(cfg, "--qos <perf|bg>", "request perf or bg QoS");
+    } else {
+        help_line(cfg, "--no-timing", "skip hardware ratio thresholds (for emulators)");
     }
     help_line(cfg, "--batch-ms <ms>", "measurement batch duration (default: 20)");
     help_line(cfg, "--cool-ms <ms>", "cool-down between batches (default: 0)");
@@ -821,6 +836,10 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
             cfg->throttle_long = true;
             continue;
         }
+        if (strcmp(arg, "--no-timing") == 0) {
+            cfg->selftest_no_timing = true;
+            continue;
+        }
         if (strcmp(arg, "--mode") == 0) {
             if (i + 1 >= argc) {
                 tty_err("option %s requires a value", arg);
@@ -930,6 +949,7 @@ int main(int argc, char **argv)
     cfg.write = false;
     cfg.throttle_long = false;
     cfg.topo_pingpong_cas = false;
+    cfg.selftest_no_timing = false;
     cfg.fast = false;
     cfg.auto_mode = false;
     cfg.quiet = false;
@@ -991,6 +1011,10 @@ int main(int argc, char **argv)
             tty_err("--mode is not valid for auto");
             return 2;
         }
+        if (cfg.selftest_no_timing) {
+            tty_err("--no-timing is only valid for 'selftest'");
+            return 2;
+        }
         return (lb_auto_run(&cfg) == LB_STATUS_OK) ? 0 : 1;
     }
 
@@ -1019,6 +1043,10 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    if (cfg.selftest_no_timing) {
+        tty_err("--no-timing is only valid for 'selftest'");
+        return 2;
+    }
     if (subtest->run == NULL) {
         tty_err("subtest '%s %s' is not implemented", module_name, subtest_name);
         return 1;

@@ -158,6 +158,8 @@ test: $(BIN) $(TEST_BINS)
 	done
 	@echo "RUN ./$(BIN) selftest"
 	@./$(BIN) selftest
+	@echo "RUN ./$(BIN) selftest --no-timing"
+	@./$(BIN) selftest --no-timing
 
 leaks: $(LEAKS_BIN) $(LEAKS_TEST_BINS)
 	@set -e; \

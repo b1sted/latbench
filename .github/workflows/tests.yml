@@ -22,4 +22,4 @@ jobs:
     with:
       enable_cross_tests: true
       bin_path: build/bin/latbench
-      cross_test_args: selftest
+      cross_test_args: selftest --no-timing
