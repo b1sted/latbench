@@ -103,6 +103,11 @@ jobs:
       - name: Build dynamic binary
         run: make clean && make CC=${{ matrix.cross }}-gcc VERSION="${GITHUB_REF_NAME#v}"
 
+      - name: Smoke test dynamic binary under QEMU
+        run: |
+          QEMU_LD_PREFIX=/usr/${{ matrix.cross }} \
+            ${{ matrix.qemu }} ./build/bin/latbench -V
+
       - name: Stage dynamic binary
         run: cp build/bin/latbench artifact/latbench-dynamic
 
@@ -408,6 +413,7 @@ jobs:
   update-homebrew:
     name: Update Homebrew tap
     needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     environment: homebrew
     permissions:
@@ -479,6 +485,7 @@ jobs:
   signal-packages:
     name: Notify packages.basted.dev
     needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     environment: packages
     permissions:

@@ -3,6 +3,7 @@ name: latbench
 arch: "${NFPM_ARCH}"
 platform: linux
 version: "${VERSION}"
+version_schema: "semver"
 section: utils
 priority: optional
 maintainer: "Nikita Mandrykin <pkg@basted.dev>"

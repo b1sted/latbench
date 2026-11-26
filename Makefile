@@ -21,7 +21,7 @@ UNAME_S := $(shell uname -s)
 
 VERSION ?= 0.1.0
 CPPFLAGS ?=
-CPPFLAGS += -DLB_VERSION=\"$(VERSION)\"
+override CPPFLAGS += -DLB_VERSION=\"$(VERSION)\"
 LDFLAGS ?=
 LDLIBS ?=
 
@@ -122,23 +122,23 @@ $(LEAKS_BIN): $(LEAKS_OBJS)
 
 $(RELEASE_OBJDIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(RELEASE_CFLAGS) $(CPPFLAGS) -Iinclude -MMD -MP -c $< -o $@
+	$(CC) $(RELEASE_CFLAGS) $(CFLAGS) $(CPPFLAGS) -Iinclude -MMD -MP -c $< -o $@
 
 $(DEV_OBJDIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(DEV_CFLAGS) $(CPPFLAGS) -Iinclude -MMD -MP -c $< -o $@
+	$(CC) $(DEV_CFLAGS) $(CFLAGS) $(CPPFLAGS) -Iinclude -MMD -MP -c $< -o $@
 
 $(LEAKS_OBJDIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(LEAKS_CFLAGS) $(CPPFLAGS) -Iinclude -MMD -MP -c $< -o $@
+	$(CC) $(LEAKS_CFLAGS) $(CFLAGS) $(CPPFLAGS) -Iinclude -MMD -MP -c $< -o $@
 
 $(TEST_OBJDIR)/rel/tests/%.o: tests/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(RELEASE_CFLAGS) $(CPPFLAGS) -Iinclude -MMD -MP -c $< -o $@
+	$(CC) $(RELEASE_CFLAGS) $(CFLAGS) $(CPPFLAGS) -Iinclude -MMD -MP -c $< -o $@
 
 $(LEAKS_OBJDIR)/tests/%.o: tests/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(LEAKS_CFLAGS) $(CPPFLAGS) -Iinclude -MMD -MP -c $< -o $@
+	$(CC) $(LEAKS_CFLAGS) $(CFLAGS) $(CPPFLAGS) -Iinclude -MMD -MP -c $< -o $@
 
 $(TEST_BINDIR)/rel/%: $(TEST_OBJDIR)/rel/tests/%.o $(TEST_LINK_RELEASE_OBJS)
 	@mkdir -p $(dir $@)
@@ -163,33 +163,41 @@ leaks: $(LEAKS_BIN) $(LEAKS_TEST_BINS)
 	@set -e; \
 	for test_bin in $(LEAKS_TEST_BINS); do \
 		echo "RUN $$test_bin"; \
+		ASAN_OPTIONS=detect_leaks=1 \
+		UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
 		./$$test_bin; \
 	done
 
 lint: style-check format-check
 	@if command -v $(CLANG_TIDY) >/dev/null 2>&1; then \
 		$(CLANG_TIDY) $(SRCS) -- $(CPPFLAGS) $(RELEASE_CFLAGS) -Iinclude; \
+	elif [ "$${CI:-}" = "true" ]; then \
+		echo "error: $(CLANG_TIDY) is required in CI" >&2; \
+		exit 1; \
 	else \
-		echo "lint: clang-tidy not found, skipping"; \
+		echo "lint: $(CLANG_TIDY) not found, skipping"; \
 	fi
 	@if command -v $(CPPCHECK) >/dev/null 2>&1; then \
 		$(CPPCHECK) --std=c99 --enable=warning,style,performance,portability \
 			--error-exitcode=1 --quiet --inline-suppr -Iinclude \
 			$(CPPCHECK_DEFINES) $(SRCS); \
+	elif [ "$${CI:-}" = "true" ]; then \
+		echo "error: $(CPPCHECK) is required in CI" >&2; \
+		exit 1; \
 	else \
-		echo "lint: cppcheck not found, skipping"; \
+		echo "lint: $(CPPCHECK) not found, skipping"; \
 	fi
 
 format:
 	@if [ -z "$(FORMAT_FILES)" ]; then \
-		echo "format: no C sources or headers found"; \
+		echo "format: no C sources or headers found" >&2; \
 		exit 1; \
 	fi
 	$(CLANG_FORMAT) -i $(FORMAT_FILES)
 
 format-check:
 	@if [ -z "$(FORMAT_FILES)" ]; then \
-		echo "format-check: no C sources or headers found"; \
+		echo "format-check: no C sources or headers found" >&2; \
 		exit 1; \
 	fi
 	$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_FILES)

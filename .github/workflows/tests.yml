@@ -5,7 +5,6 @@ on:
     branches:
       - main
       - dev
-      - 'v*'
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -13,19 +12,24 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unit-tests:
     name: Unit tests (${{ matrix.os }}, ${{ matrix.cc }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             cc: gcc
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             cc: clang
-          - os: macos-latest
+          - os: macos-15
             cc: clang
 
     steps:
@@ -40,7 +44,8 @@ jobs:
 
   cross-tests:
     name: Cross self-test (${{ matrix.arch }})
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -78,7 +83,8 @@ jobs:
 
   leaks:
     name: Memory leaks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -90,6 +96,7 @@ jobs:
   lint:
     name: Static analysis
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -98,7 +105,7 @@ jobs:
       - name: Install linters
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-format-18 clang-tidy cppcheck
+          sudo apt-get install -y --no-install-recommends clang-format-18 clang-tidy cppcheck
 
       - name: Run linters
         run: make lint CLANG_FORMAT=clang-format-18
