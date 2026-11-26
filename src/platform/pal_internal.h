@@ -8,6 +8,7 @@
  */
 
 #include <pthread.h>
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "pal/pal.h"
@@ -16,6 +17,7 @@ struct pal_mem {
     void *base;
     size_t mapped_size;
     size_t size;
+    bool thp_active;
 };
 
 struct pal_thread {

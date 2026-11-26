@@ -132,6 +132,11 @@ size_t pal_mem_size(const pal_mem_t *mem)
     return mem->size;
 }
 
+bool pal_mem_is_thp(const pal_mem_t *mem)
+{
+    return (mem != NULL) && mem->thp_active;
+}
+
 void pal_mem_free(pal_mem_t *mem)
 {
     if (mem == NULL) {
@@ -1068,6 +1073,11 @@ lb_status_t pal_cpu_list(int32_t *cpus, size_t capacity, size_t *out_count)
     return LB_STATUS_OK;
 }
 
+lb_thp_mode_t pal_thp_mode(void)
+{
+    return LB_THP_UNSUPPORTED;
+}
+
 lb_status_t pal_pin_cpu(int32_t cpu_id)
 {
     (void)cpu_id;
@@ -1113,6 +1123,7 @@ pal_mem_t *pal_mem_alloc(size_t size, uint32_t flags)
     mem->base = base;
     mem->mapped_size = 0u;
     mem->size = size;
+    mem->thp_active = false;
     return mem;
 
 cleanup:
