@@ -62,6 +62,19 @@ typedef struct pal_os_sig_result_t {
 } pal_os_sig_result_t;
 
 /*
+ * Swap-in latency probe. pages is the number of pages paged out and touched
+ * again, major_faults and minor_faults are the deltas observed over the
+ * measured pass, and swap_free_kib is the free swap visible at the start.
+ */
+typedef struct pal_os_swap_result_t {
+    uint64_t elapsed_ns;
+    uint64_t pages;
+    uint64_t major_faults;
+    uint64_t minor_faults;
+    uint64_t swap_free_kib;
+} pal_os_swap_result_t;
+
+/*
  * Time calls round trips of pal_now_ns() and of a one-byte write() to
  * /dev/null. Both paths are warmed up before the measured region.
  */
@@ -109,5 +122,15 @@ lb_status_t pal_os_sig_roundtrip(uint32_t signals, pal_os_sig_result_t *out);
  */
 lb_status_t pal_os_sleep_us(uint32_t target_us, uint32_t samples, uint64_t *samples_ns,
                             size_t capacity, size_t *out_count);
+
+/*
+ * Page at most max_pages anonymous pages out with madvise(MADV_PAGEOUT) and
+ * time one access to every page in a shuffled order. capacity must be at least
+ * max_pages; samples_ns receives one latency per page and out_count the number
+ * of valid entries. Returns LB_STATUS_UNSUPPORTED when the host has no usable
+ * swap or the kernel cannot page anonymous memory out.
+ */
+lb_status_t pal_os_swap_probe(size_t max_pages, uint64_t *samples_ns, size_t capacity,
+                              size_t *out_count, pal_os_swap_result_t *out);
 
 #endif /* PAL_PAL_OS_H */

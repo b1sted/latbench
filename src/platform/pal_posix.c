@@ -995,6 +995,24 @@ lb_status_t pal_os_sleep_us(uint32_t target_us, uint32_t samples, uint64_t *samp
     return LB_STATUS_OK;
 }
 
+#if !defined(__linux__)
+lb_status_t pal_os_swap_probe(size_t max_pages, uint64_t *samples_ns, size_t capacity,
+                              size_t *out_count, pal_os_swap_result_t *out)
+{
+    if (out_count != NULL) {
+        *out_count = 0u;
+    }
+    if (out != NULL) {
+        *out = (pal_os_swap_result_t){0};
+    }
+    if (max_pages == 0u || samples_ns == NULL || out_count == NULL || out == NULL ||
+        capacity < max_pages) {
+        return LB_STATUS_INVALID_ARG;
+    }
+    return LB_STATUS_UNSUPPORTED;
+}
+#endif /* !__linux__ */
+
 /*
  * Platform-neutral fallbacks. Linux and macOS provide their own
  * implementations; this block keeps a plain POSIX target buildable.
