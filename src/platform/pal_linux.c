@@ -102,6 +102,55 @@ uint32_t pal_cpu_count(void)
     return (uint32_t)count;
 }
 
+lb_status_t pal_cpu_list(int32_t *cpus, size_t capacity, size_t *out_count)
+{
+    cpu_set_t set = {0};
+    size_t count = 0u;
+
+    if (out_count != NULL) {
+        *out_count = 0u;
+    }
+    if (cpus == NULL || capacity == 0u || out_count == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof(set), &set) == 0) {
+        int32_t cpu = 0;
+
+        for (cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+            if (CPU_ISSET((unsigned int)cpu, &set)) {
+                if (count < capacity) {
+                    cpus[count] = cpu;
+                }
+                count++;
+            }
+        }
+        if (count > 0u) {
+            *out_count = (count < capacity) ? count : capacity;
+            return LB_STATUS_OK;
+        }
+    }
+
+    /*
+     * A denied or empty affinity mask (some sandboxes) still has to report a
+     * usable CPU set, so fall back to a dense range of online CPU IDs.
+     */
+    count = (size_t)pal_cpu_count();
+    if (count > capacity) {
+        count = capacity;
+    }
+    {
+        size_t i = 0u;
+
+        for (i = 0u; i < count; i++) {
+            cpus[i] = (int32_t)i;
+        }
+    }
+    *out_count = count;
+    return LB_STATUS_OK;
+}
+
 lb_status_t pal_pin_cpu(int32_t cpu_id)
 {
     cpu_set_t set = {0};
