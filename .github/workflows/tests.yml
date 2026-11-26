@@ -1,0 +1,25 @@
+name: Tests and Linters
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    uses: b1sted/ci/.github/workflows/c-ci.yml@v1
+    with:
+      enable_cross_tests: true
+      bin_path: build/bin/latbench
+      cross_test_args: selftest --no-timing
