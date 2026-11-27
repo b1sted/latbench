@@ -39,15 +39,21 @@
 #define BR_RSB_JUMP_PCT 15.0
 #define BR_RSB_SUSTAIN_PCT 12.0
 #define BR_RSB_SMALL_DEPTH 16u
-#define BR_RSB_DEPTH_COUNT 9u
+#define BR_RSB_DEPTH_COUNT 12u
 
 /* branch btb: indirect calls through a table of unique trampolines. */
-#define BR_BTB_MAX 1024u
+#define BR_BTB_MAX 4096u
 #define BR_BTB_CALLS UINT64_C(2097152)
 #define BR_BTB_REPEATS 3u
 #define BR_BTB_JUMP_PCT 25.0
 #define BR_BTB_SUSTAIN_PCT 20.0
-#define BR_BTB_COUNT_COUNT 7u
+#define BR_BTB_COUNT_COUNT 9u
+
+/* branch btb callsites: distinct indirect PCs over a small target pool. */
+#define BR_BTB_SITE_BLOCK_COUNT 64u
+#define BR_BTB_SITE_BLOCK_SITES 64u
+#define BR_BTB_SITE_COUNT_COUNT 7u
+#define BR_BTB_SITE_POOL 16u
 
 /* Compact auto mode: fewer iterations and repeats. */
 #define BR_FAST_REPEATS 2u
@@ -63,11 +69,15 @@ static const size_t BR_HIST_PERIODS[BR_HIST_PERIOD_COUNT] = {
 };
 
 static const uint64_t BR_RSB_DEPTHS[BR_RSB_DEPTH_COUNT] = {
-    4u, 8u, 12u, 16u, 20u, 24u, 32u, 48u, 64u,
+    4u, 8u, 12u, 16u, 20u, 24u, 32u, 48u, 56u, 64u, 80u, 96u,
 };
 
 static const size_t BR_BTB_COUNTS[BR_BTB_COUNT_COUNT] = {
-    16u, 32u, 64u, 128u, 256u, 512u, 1024u,
+    16u, 32u, 64u, 128u, 256u, 512u, 1024u, 2048u, 4096u,
+};
+
+static const size_t BR_BTB_SITE_COUNTS[BR_BTB_SITE_COUNT_COUNT] = {
+    64u, 128u, 256u, 512u, 1024u, 2048u, 4096u,
 };
 
 /*
@@ -466,144 +476,251 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
 
 /* -------------------------------------------------------------- branch btb */
 
-#define BR_BTB_TRAMPOLINE(id)                                                                      \
-    static PAL_NOINLINE uint64_t br_btb_fn_##id(uint64_t acc)                                      \
+
+/*
+ * Each trampoline mixes the unique (row, col) identity into the accumulator.
+ * Five dependent operations keep the body around 48-64 bytes so 4096 of them
+ * overflow a 128-192 KiB L1i, while the distinct constants defeat -fipa-icf.
+ */
+#define BR_BTB_TRAMPOLINE(row, col)                                                                \
+    static PAL_NOINLINE uint64_t br_btb_fn_##row##_##col(uint64_t acc)                             \
     {                                                                                              \
-        return (acc * UINT64_C(33)) ^ ((uint64_t)(id) * UINT64_C(0x9e3779b97f4a7c15));             \
+        const uint64_t id = ((uint64_t)(row) * UINT64_C(16)) + (uint64_t)(col);                    \
+        acc ^= id * UINT64_C(0x9e3779b97f4a7c15);                                                  \
+        acc = (acc << 7u) | (acc >> 57u);                                                          \
+        acc += id * UINT64_C(0x2545f4914f6cdd1d);                                                  \
+        acc *= UINT64_C(0xbf58476d1ce4e5b9);                                                       \
+        return acc ^ id;                                                                           \
     }
 
-#define BR_BTB_SEQ_16(m, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15)     \
-    m(a0) m(a1) m(a2) m(a3) m(a4) m(a5) m(a6) m(a7) m(a8) m(a9) m(a10) m(a11) m(a12) m(a13) m(a14) \
-        m(a15)
+/* One sequence of 16 adjacent targets in a single 256-entry row group. */
+#define BR_BTB_SEQ_16(m, row)                                                                      \
+    m(row, 0) m(row, 1) m(row, 2) m(row, 3) m(row, 4) m(row, 5) m(row, 6) m(row, 7) m(row, 8)      \
+        m(row, 9) m(row, 10) m(row, 11) m(row, 12) m(row, 13) m(row, 14) m(row, 15)
 
+/* 16 row groups make one 256-target block without preprocessor arithmetic. */
+#define BR_BTB_SEQ_256(m, r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15)    \
+    BR_BTB_SEQ_16(m, r0)                                                                           \
+    BR_BTB_SEQ_16(m, r1)                                                                           \
+    BR_BTB_SEQ_16(m, r2)                                                                           \
+    BR_BTB_SEQ_16(m, r3)                                                                           \
+    BR_BTB_SEQ_16(m, r4)                                                                           \
+    BR_BTB_SEQ_16(m, r5)                                                                           \
+    BR_BTB_SEQ_16(m, r6)                                                                           \
+    BR_BTB_SEQ_16(m, r7)                                                                           \
+    BR_BTB_SEQ_16(m, r8)                                                                           \
+    BR_BTB_SEQ_16(m, r9)                                                                           \
+    BR_BTB_SEQ_16(m, r10)                                                                          \
+    BR_BTB_SEQ_16(m, r11)                                                                          \
+    BR_BTB_SEQ_16(m, r12)                                                                          \
+    BR_BTB_SEQ_16(m, r13)                                                                          \
+    BR_BTB_SEQ_16(m, r14)                                                                          \
+    BR_BTB_SEQ_16(m, r15)
+
+/* All 4096 targets: 16 blocks of 256 functions each. */
 #define BR_BTB_ALL(m)                                                                              \
-    BR_BTB_SEQ_16(m, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)                         \
-    BR_BTB_SEQ_16(m, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)               \
-    BR_BTB_SEQ_16(m, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47)               \
-    BR_BTB_SEQ_16(m, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63)               \
-    BR_BTB_SEQ_16(m, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79)               \
-    BR_BTB_SEQ_16(m, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95)               \
-    BR_BTB_SEQ_16(m, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111)   \
-    BR_BTB_SEQ_16(m, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,    \
-                  127)                                                                             \
-    BR_BTB_SEQ_16(m, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142,    \
-                  143)                                                                             \
-    BR_BTB_SEQ_16(m, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158,    \
-                  159)                                                                             \
-    BR_BTB_SEQ_16(m, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174,    \
-                  175)                                                                             \
-    BR_BTB_SEQ_16(m, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190,    \
-                  191)                                                                             \
-    BR_BTB_SEQ_16(m, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206,    \
-                  207)                                                                             \
-    BR_BTB_SEQ_16(m, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222,    \
-                  223)                                                                             \
-    BR_BTB_SEQ_16(m, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238,    \
-                  239)                                                                             \
-    BR_BTB_SEQ_16(m, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254,    \
-                  255)                                                                             \
-    BR_BTB_SEQ_16(m, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270,    \
-                  271)                                                                             \
-    BR_BTB_SEQ_16(m, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286,    \
-                  287)                                                                             \
-    BR_BTB_SEQ_16(m, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300, 301, 302,    \
-                  303)                                                                             \
-    BR_BTB_SEQ_16(m, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318,    \
-                  319)                                                                             \
-    BR_BTB_SEQ_16(m, 320, 321, 322, 323, 324, 325, 326, 327, 328, 329, 330, 331, 332, 333, 334,    \
-                  335)                                                                             \
-    BR_BTB_SEQ_16(m, 336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 347, 348, 349, 350,    \
-                  351)                                                                             \
-    BR_BTB_SEQ_16(m, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361, 362, 363, 364, 365, 366,    \
-                  367)                                                                             \
-    BR_BTB_SEQ_16(m, 368, 369, 370, 371, 372, 373, 374, 375, 376, 377, 378, 379, 380, 381, 382,    \
-                  383)                                                                             \
-    BR_BTB_SEQ_16(m, 384, 385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396, 397, 398,    \
-                  399)                                                                             \
-    BR_BTB_SEQ_16(m, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414,    \
-                  415)                                                                             \
-    BR_BTB_SEQ_16(m, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428, 429, 430,    \
-                  431)                                                                             \
-    BR_BTB_SEQ_16(m, 432, 433, 434, 435, 436, 437, 438, 439, 440, 441, 442, 443, 444, 445, 446,    \
-                  447)                                                                             \
-    BR_BTB_SEQ_16(m, 448, 449, 450, 451, 452, 453, 454, 455, 456, 457, 458, 459, 460, 461, 462,    \
-                  463)                                                                             \
-    BR_BTB_SEQ_16(m, 464, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477, 478,    \
-                  479)                                                                             \
-    BR_BTB_SEQ_16(m, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 492, 493, 494,    \
-                  495)                                                                             \
-    BR_BTB_SEQ_16(m, 496, 497, 498, 499, 500, 501, 502, 503, 504, 505, 506, 507, 508, 509, 510,    \
-                  511)                                                                             \
-    BR_BTB_SEQ_16(m, 512, 513, 514, 515, 516, 517, 518, 519, 520, 521, 522, 523, 524, 525, 526,    \
-                  527)                                                                             \
-    BR_BTB_SEQ_16(m, 528, 529, 530, 531, 532, 533, 534, 535, 536, 537, 538, 539, 540, 541, 542,    \
-                  543)                                                                             \
-    BR_BTB_SEQ_16(m, 544, 545, 546, 547, 548, 549, 550, 551, 552, 553, 554, 555, 556, 557, 558,    \
-                  559)                                                                             \
-    BR_BTB_SEQ_16(m, 560, 561, 562, 563, 564, 565, 566, 567, 568, 569, 570, 571, 572, 573, 574,    \
-                  575)                                                                             \
-    BR_BTB_SEQ_16(m, 576, 577, 578, 579, 580, 581, 582, 583, 584, 585, 586, 587, 588, 589, 590,    \
-                  591)                                                                             \
-    BR_BTB_SEQ_16(m, 592, 593, 594, 595, 596, 597, 598, 599, 600, 601, 602, 603, 604, 605, 606,    \
-                  607)                                                                             \
-    BR_BTB_SEQ_16(m, 608, 609, 610, 611, 612, 613, 614, 615, 616, 617, 618, 619, 620, 621, 622,    \
-                  623)                                                                             \
-    BR_BTB_SEQ_16(m, 624, 625, 626, 627, 628, 629, 630, 631, 632, 633, 634, 635, 636, 637, 638,    \
-                  639)                                                                             \
-    BR_BTB_SEQ_16(m, 640, 641, 642, 643, 644, 645, 646, 647, 648, 649, 650, 651, 652, 653, 654,    \
-                  655)                                                                             \
-    BR_BTB_SEQ_16(m, 656, 657, 658, 659, 660, 661, 662, 663, 664, 665, 666, 667, 668, 669, 670,    \
-                  671)                                                                             \
-    BR_BTB_SEQ_16(m, 672, 673, 674, 675, 676, 677, 678, 679, 680, 681, 682, 683, 684, 685, 686,    \
-                  687)                                                                             \
-    BR_BTB_SEQ_16(m, 688, 689, 690, 691, 692, 693, 694, 695, 696, 697, 698, 699, 700, 701, 702,    \
-                  703)                                                                             \
-    BR_BTB_SEQ_16(m, 704, 705, 706, 707, 708, 709, 710, 711, 712, 713, 714, 715, 716, 717, 718,    \
-                  719)                                                                             \
-    BR_BTB_SEQ_16(m, 720, 721, 722, 723, 724, 725, 726, 727, 728, 729, 730, 731, 732, 733, 734,    \
-                  735)                                                                             \
-    BR_BTB_SEQ_16(m, 736, 737, 738, 739, 740, 741, 742, 743, 744, 745, 746, 747, 748, 749, 750,    \
-                  751)                                                                             \
-    BR_BTB_SEQ_16(m, 752, 753, 754, 755, 756, 757, 758, 759, 760, 761, 762, 763, 764, 765, 766,    \
-                  767)                                                                             \
-    BR_BTB_SEQ_16(m, 768, 769, 770, 771, 772, 773, 774, 775, 776, 777, 778, 779, 780, 781, 782,    \
-                  783)                                                                             \
-    BR_BTB_SEQ_16(m, 784, 785, 786, 787, 788, 789, 790, 791, 792, 793, 794, 795, 796, 797, 798,    \
-                  799)                                                                             \
-    BR_BTB_SEQ_16(m, 800, 801, 802, 803, 804, 805, 806, 807, 808, 809, 810, 811, 812, 813, 814,    \
-                  815)                                                                             \
-    BR_BTB_SEQ_16(m, 816, 817, 818, 819, 820, 821, 822, 823, 824, 825, 826, 827, 828, 829, 830,    \
-                  831)                                                                             \
-    BR_BTB_SEQ_16(m, 832, 833, 834, 835, 836, 837, 838, 839, 840, 841, 842, 843, 844, 845, 846,    \
-                  847)                                                                             \
-    BR_BTB_SEQ_16(m, 848, 849, 850, 851, 852, 853, 854, 855, 856, 857, 858, 859, 860, 861, 862,    \
-                  863)                                                                             \
-    BR_BTB_SEQ_16(m, 864, 865, 866, 867, 868, 869, 870, 871, 872, 873, 874, 875, 876, 877, 878,    \
-                  879)                                                                             \
-    BR_BTB_SEQ_16(m, 880, 881, 882, 883, 884, 885, 886, 887, 888, 889, 890, 891, 892, 893, 894,    \
-                  895)                                                                             \
-    BR_BTB_SEQ_16(m, 896, 897, 898, 899, 900, 901, 902, 903, 904, 905, 906, 907, 908, 909, 910,    \
-                  911)                                                                             \
-    BR_BTB_SEQ_16(m, 912, 913, 914, 915, 916, 917, 918, 919, 920, 921, 922, 923, 924, 925, 926,    \
-                  927)                                                                             \
-    BR_BTB_SEQ_16(m, 928, 929, 930, 931, 932, 933, 934, 935, 936, 937, 938, 939, 940, 941, 942,    \
-                  943)                                                                             \
-    BR_BTB_SEQ_16(m, 944, 945, 946, 947, 948, 949, 950, 951, 952, 953, 954, 955, 956, 957, 958,    \
-                  959)                                                                             \
-    BR_BTB_SEQ_16(m, 960, 961, 962, 963, 964, 965, 966, 967, 968, 969, 970, 971, 972, 973, 974,    \
-                  975)                                                                             \
-    BR_BTB_SEQ_16(m, 976, 977, 978, 979, 980, 981, 982, 983, 984, 985, 986, 987, 988, 989, 990,    \
-                  991)                                                                             \
-    BR_BTB_SEQ_16(m, 992, 993, 994, 995, 996, 997, 998, 999, 1000, 1001, 1002, 1003, 1004, 1005,   \
-                  1006, 1007)                                                                      \
-    BR_BTB_SEQ_16(m, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, \
-                  1021, 1022, 1023)
+    BR_BTB_SEQ_256(m, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)                        \
+    BR_BTB_SEQ_256(m, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)              \
+    BR_BTB_SEQ_256(m, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47)              \
+    BR_BTB_SEQ_256(m, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63)              \
+    BR_BTB_SEQ_256(m, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79)              \
+    BR_BTB_SEQ_256(m, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95)              \
+    BR_BTB_SEQ_256(m, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111)  \
+    BR_BTB_SEQ_256(m, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,   \
+                   127)                                                                            \
+    BR_BTB_SEQ_256(m, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142,   \
+                   143)                                                                            \
+    BR_BTB_SEQ_256(m, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158,   \
+                   159)                                                                            \
+    BR_BTB_SEQ_256(m, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174,   \
+                   175)                                                                            \
+    BR_BTB_SEQ_256(m, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190,   \
+                   191)                                                                            \
+    BR_BTB_SEQ_256(m, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206,   \
+                   207)                                                                            \
+    BR_BTB_SEQ_256(m, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222,   \
+                   223)                                                                            \
+    BR_BTB_SEQ_256(m, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238,   \
+                   239)                                                                            \
+    BR_BTB_SEQ_256(m, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254,   \
+                   255)
 
 BR_BTB_ALL(BR_BTB_TRAMPOLINE)
 
-#define BR_BTB_ENTRY(id) br_btb_fn_##id,
+#define BR_BTB_ENTRY(row, col) br_btb_fn_##row##_##col,
 
 static br_btb_fn_t volatile g_br_btb_fns[BR_BTB_MAX] = {BR_BTB_ALL(BR_BTB_ENTRY)};
+
+/*
+ * Multi-callsite probe: 64 noinline blocks with 64 unrolled indirect call
+ * instructions each. Targets rotate through a 16-entry pool, so the target
+ * footprint stays inside L1i while the probe exercises 4096 distinct
+ * indirect-branch PCs.
+ */
+#define BR_BTB_SITE_CALL(id, k)                                                                    \
+    acc = g_br_btb_fns[(((size_t)(id) + (size_t)(k)) & (BR_BTB_SITE_POOL - 1u))](acc);
+
+#define BR_BTB_SITE_BLOCK(id)                                                                      \
+    static PAL_NOINLINE uint64_t br_btb_site_blk_##id(uint64_t acc)                                \
+    {                                                                                              \
+        BR_BTB_SITE_CALL(id, 0)                                                                    \
+        BR_BTB_SITE_CALL(id, 1)                                                                    \
+        BR_BTB_SITE_CALL(id, 2)                                                                    \
+        BR_BTB_SITE_CALL(id, 3)                                                                    \
+        BR_BTB_SITE_CALL(id, 4)                                                                    \
+        BR_BTB_SITE_CALL(id, 5)                                                                    \
+        BR_BTB_SITE_CALL(id, 6)                                                                    \
+        BR_BTB_SITE_CALL(id, 7)                                                                    \
+        BR_BTB_SITE_CALL(id, 8)                                                                    \
+        BR_BTB_SITE_CALL(id, 9)                                                                    \
+        BR_BTB_SITE_CALL(id, 10)                                                                   \
+        BR_BTB_SITE_CALL(id, 11)                                                                   \
+        BR_BTB_SITE_CALL(id, 12)                                                                   \
+        BR_BTB_SITE_CALL(id, 13)                                                                   \
+        BR_BTB_SITE_CALL(id, 14)                                                                   \
+        BR_BTB_SITE_CALL(id, 15)                                                                   \
+        BR_BTB_SITE_CALL(id, 16)                                                                   \
+        BR_BTB_SITE_CALL(id, 17)                                                                   \
+        BR_BTB_SITE_CALL(id, 18)                                                                   \
+        BR_BTB_SITE_CALL(id, 19)                                                                   \
+        BR_BTB_SITE_CALL(id, 20)                                                                   \
+        BR_BTB_SITE_CALL(id, 21)                                                                   \
+        BR_BTB_SITE_CALL(id, 22)                                                                   \
+        BR_BTB_SITE_CALL(id, 23)                                                                   \
+        BR_BTB_SITE_CALL(id, 24)                                                                   \
+        BR_BTB_SITE_CALL(id, 25)                                                                   \
+        BR_BTB_SITE_CALL(id, 26)                                                                   \
+        BR_BTB_SITE_CALL(id, 27)                                                                   \
+        BR_BTB_SITE_CALL(id, 28)                                                                   \
+        BR_BTB_SITE_CALL(id, 29)                                                                   \
+        BR_BTB_SITE_CALL(id, 30)                                                                   \
+        BR_BTB_SITE_CALL(id, 31)                                                                   \
+        BR_BTB_SITE_CALL(id, 32)                                                                   \
+        BR_BTB_SITE_CALL(id, 33)                                                                   \
+        BR_BTB_SITE_CALL(id, 34)                                                                   \
+        BR_BTB_SITE_CALL(id, 35)                                                                   \
+        BR_BTB_SITE_CALL(id, 36)                                                                   \
+        BR_BTB_SITE_CALL(id, 37)                                                                   \
+        BR_BTB_SITE_CALL(id, 38)                                                                   \
+        BR_BTB_SITE_CALL(id, 39)                                                                   \
+        BR_BTB_SITE_CALL(id, 40)                                                                   \
+        BR_BTB_SITE_CALL(id, 41)                                                                   \
+        BR_BTB_SITE_CALL(id, 42)                                                                   \
+        BR_BTB_SITE_CALL(id, 43)                                                                   \
+        BR_BTB_SITE_CALL(id, 44)                                                                   \
+        BR_BTB_SITE_CALL(id, 45)                                                                   \
+        BR_BTB_SITE_CALL(id, 46)                                                                   \
+        BR_BTB_SITE_CALL(id, 47)                                                                   \
+        BR_BTB_SITE_CALL(id, 48)                                                                   \
+        BR_BTB_SITE_CALL(id, 49)                                                                   \
+        BR_BTB_SITE_CALL(id, 50)                                                                   \
+        BR_BTB_SITE_CALL(id, 51)                                                                   \
+        BR_BTB_SITE_CALL(id, 52)                                                                   \
+        BR_BTB_SITE_CALL(id, 53)                                                                   \
+        BR_BTB_SITE_CALL(id, 54)                                                                   \
+        BR_BTB_SITE_CALL(id, 55)                                                                   \
+        BR_BTB_SITE_CALL(id, 56)                                                                   \
+        BR_BTB_SITE_CALL(id, 57)                                                                   \
+        BR_BTB_SITE_CALL(id, 58)                                                                   \
+        BR_BTB_SITE_CALL(id, 59)                                                                   \
+        BR_BTB_SITE_CALL(id, 60)                                                                   \
+        BR_BTB_SITE_CALL(id, 61)                                                                   \
+        BR_BTB_SITE_CALL(id, 62)                                                                   \
+        BR_BTB_SITE_CALL(id, 63)                                                                   \
+        return acc ^ ((uint64_t)(id) * UINT64_C(0x9e3779b97f4a7c15));                              \
+    }
+
+BR_BTB_SITE_BLOCK(0)
+BR_BTB_SITE_BLOCK(1)
+BR_BTB_SITE_BLOCK(2)
+BR_BTB_SITE_BLOCK(3)
+BR_BTB_SITE_BLOCK(4)
+BR_BTB_SITE_BLOCK(5)
+BR_BTB_SITE_BLOCK(6)
+BR_BTB_SITE_BLOCK(7)
+BR_BTB_SITE_BLOCK(8)
+BR_BTB_SITE_BLOCK(9)
+BR_BTB_SITE_BLOCK(10)
+BR_BTB_SITE_BLOCK(11)
+BR_BTB_SITE_BLOCK(12)
+BR_BTB_SITE_BLOCK(13)
+BR_BTB_SITE_BLOCK(14)
+BR_BTB_SITE_BLOCK(15)
+BR_BTB_SITE_BLOCK(16)
+BR_BTB_SITE_BLOCK(17)
+BR_BTB_SITE_BLOCK(18)
+BR_BTB_SITE_BLOCK(19)
+BR_BTB_SITE_BLOCK(20)
+BR_BTB_SITE_BLOCK(21)
+BR_BTB_SITE_BLOCK(22)
+BR_BTB_SITE_BLOCK(23)
+BR_BTB_SITE_BLOCK(24)
+BR_BTB_SITE_BLOCK(25)
+BR_BTB_SITE_BLOCK(26)
+BR_BTB_SITE_BLOCK(27)
+BR_BTB_SITE_BLOCK(28)
+BR_BTB_SITE_BLOCK(29)
+BR_BTB_SITE_BLOCK(30)
+BR_BTB_SITE_BLOCK(31)
+BR_BTB_SITE_BLOCK(32)
+BR_BTB_SITE_BLOCK(33)
+BR_BTB_SITE_BLOCK(34)
+BR_BTB_SITE_BLOCK(35)
+BR_BTB_SITE_BLOCK(36)
+BR_BTB_SITE_BLOCK(37)
+BR_BTB_SITE_BLOCK(38)
+BR_BTB_SITE_BLOCK(39)
+BR_BTB_SITE_BLOCK(40)
+BR_BTB_SITE_BLOCK(41)
+BR_BTB_SITE_BLOCK(42)
+BR_BTB_SITE_BLOCK(43)
+BR_BTB_SITE_BLOCK(44)
+BR_BTB_SITE_BLOCK(45)
+BR_BTB_SITE_BLOCK(46)
+BR_BTB_SITE_BLOCK(47)
+BR_BTB_SITE_BLOCK(48)
+BR_BTB_SITE_BLOCK(49)
+BR_BTB_SITE_BLOCK(50)
+BR_BTB_SITE_BLOCK(51)
+BR_BTB_SITE_BLOCK(52)
+BR_BTB_SITE_BLOCK(53)
+BR_BTB_SITE_BLOCK(54)
+BR_BTB_SITE_BLOCK(55)
+BR_BTB_SITE_BLOCK(56)
+BR_BTB_SITE_BLOCK(57)
+BR_BTB_SITE_BLOCK(58)
+BR_BTB_SITE_BLOCK(59)
+BR_BTB_SITE_BLOCK(60)
+BR_BTB_SITE_BLOCK(61)
+BR_BTB_SITE_BLOCK(62)
+BR_BTB_SITE_BLOCK(63)
+
+#define BR_BTB_SITE_ENTRY(id) br_btb_site_blk_##id,
+
+static br_btb_fn_t volatile g_br_btb_site_blks[BR_BTB_SITE_BLOCK_COUNT] = {
+    BR_BTB_SITE_ENTRY(0) BR_BTB_SITE_ENTRY(1) BR_BTB_SITE_ENTRY(2) BR_BTB_SITE_ENTRY(
+        3) BR_BTB_SITE_ENTRY(4) BR_BTB_SITE_ENTRY(5) BR_BTB_SITE_ENTRY(6) BR_BTB_SITE_ENTRY(7)
+        BR_BTB_SITE_ENTRY(8) BR_BTB_SITE_ENTRY(9) BR_BTB_SITE_ENTRY(10) BR_BTB_SITE_ENTRY(
+            11) BR_BTB_SITE_ENTRY(12) BR_BTB_SITE_ENTRY(13) BR_BTB_SITE_ENTRY(14)
+            BR_BTB_SITE_ENTRY(15) BR_BTB_SITE_ENTRY(16) BR_BTB_SITE_ENTRY(17) BR_BTB_SITE_ENTRY(
+                18) BR_BTB_SITE_ENTRY(19) BR_BTB_SITE_ENTRY(20) BR_BTB_SITE_ENTRY(21)
+                BR_BTB_SITE_ENTRY(22) BR_BTB_SITE_ENTRY(23) BR_BTB_SITE_ENTRY(24) BR_BTB_SITE_ENTRY(
+                    25) BR_BTB_SITE_ENTRY(26) BR_BTB_SITE_ENTRY(27) BR_BTB_SITE_ENTRY(28)
+                    BR_BTB_SITE_ENTRY(29) BR_BTB_SITE_ENTRY(30) BR_BTB_SITE_ENTRY(
+                        31) BR_BTB_SITE_ENTRY(32) BR_BTB_SITE_ENTRY(33) BR_BTB_SITE_ENTRY(34)
+                        BR_BTB_SITE_ENTRY(35) BR_BTB_SITE_ENTRY(36) BR_BTB_SITE_ENTRY(
+                            37) BR_BTB_SITE_ENTRY(38) BR_BTB_SITE_ENTRY(39) BR_BTB_SITE_ENTRY(40)
+                            BR_BTB_SITE_ENTRY(41) BR_BTB_SITE_ENTRY(42) BR_BTB_SITE_ENTRY(43)
+                                BR_BTB_SITE_ENTRY(44) BR_BTB_SITE_ENTRY(45) BR_BTB_SITE_ENTRY(46)
+                                    BR_BTB_SITE_ENTRY(47) BR_BTB_SITE_ENTRY(48) BR_BTB_SITE_ENTRY(
+                                        49) BR_BTB_SITE_ENTRY(50) BR_BTB_SITE_ENTRY(51)
+                                        BR_BTB_SITE_ENTRY(52) BR_BTB_SITE_ENTRY(53)
+                                            BR_BTB_SITE_ENTRY(54) BR_BTB_SITE_ENTRY(55)
+                                                BR_BTB_SITE_ENTRY(56) BR_BTB_SITE_ENTRY(57)
+                                                    BR_BTB_SITE_ENTRY(58) BR_BTB_SITE_ENTRY(59)
+                                                        BR_BTB_SITE_ENTRY(60) BR_BTB_SITE_ENTRY(61)
+                                                            BR_BTB_SITE_ENTRY(62)
+                                                                BR_BTB_SITE_ENTRY(63)};
 
 static PAL_NOINLINE uint64_t br_btb_walk(size_t count, uint64_t iterations)
 {
@@ -621,6 +738,40 @@ static PAL_NOINLINE uint64_t br_btb_walk(size_t count, uint64_t iterations)
     PAL_BARRIER();
     g_br_sink = acc;
     return acc;
+}
+
+static PAL_NOINLINE uint64_t br_btb_sites_walk(size_t blocks, uint64_t iterations)
+{
+    uint64_t acc = UINT64_C(0x517cc1b727220a95);
+    uint64_t it = 0u;
+
+    for (it = 0u; it < iterations; it++) {
+        size_t block = 0u;
+
+        for (block = 0u; block < blocks; block++) {
+            const br_btb_fn_t fn = g_br_btb_site_blks[block];
+
+            acc = fn(acc);
+        }
+    }
+
+    PAL_BARRIER();
+    g_br_sink = acc;
+    return acc;
+}
+
+static double br_btb_sites_sample(size_t blocks, uint64_t iterations)
+{
+    const uint64_t calls = iterations * (uint64_t)blocks * (uint64_t)BR_BTB_SITE_BLOCK_SITES;
+    const uint64_t begin = pal_now_ns();
+    const uint64_t sink = br_btb_sites_walk(blocks, iterations);
+    uint64_t end = pal_now_ns();
+
+    g_br_sink = sink;
+    if (end <= begin || calls == 0u) {
+        return 0.0;
+    }
+    return (double)(end - begin) / (double)calls;
 }
 
 static double br_btb_sample(size_t count, uint64_t iterations)
@@ -641,9 +792,13 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
 {
     double ns_per_call[BR_BTB_COUNT_COUNT] = {0.0};
     double delta_pct[BR_BTB_COUNT_COUNT] = {0.0};
+    double site_ns[BR_BTB_SITE_COUNT_COUNT] = {0.0};
+    double site_delta[BR_BTB_SITE_COUNT_COUNT] = {0.0};
     double base_ns = 0.0;
     size_t threshold_index = 0u;
     bool threshold_found = false;
+    size_t site_threshold_index = 0u;
+    bool site_threshold_found = false;
     uint64_t calls = 0u;
     size_t repeats = 0u;
     uint64_t baseline = 0u;
@@ -660,7 +815,8 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
 
     tty_csv_row(cfg, "branch,btb,functions,ns_per_call,delta_pct");
     tty_section(cfg, "Branch target buffer");
-    tty_kv(cfg, "Trampolines", "16 .. 1024 unique noinline targets");
+    tty_kv(cfg, "Trampolines", "16 .. 4096 unique noinline targets");
+    tty_kv(cfg, "Callsites", "64 .. 4096 distinct indirect PCs");
     tty_kv(cfg, "Calls / repeats", "%" PRIu64 " / %zu", calls, repeats);
     tty_blank(cfg);
     tty_header(cfg, "  %9s %12s %10s", "Functions", "ns/call", "delta");
@@ -669,10 +825,13 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
 
     for (index = 0u; index < BR_BTB_COUNT_COUNT; index++) {
         const size_t count = BR_BTB_COUNTS[index];
-        const uint64_t iterations = calls / (uint64_t)count;
+        uint64_t iterations = calls / (uint64_t)count;
         double samples[BR_BTB_REPEATS] = {0.0};
         size_t repeat = 0u;
 
+        if (iterations < 64u) {
+            iterations = 64u;
+        }
         (void)br_btb_walk(count, iterations / 8u);
         for (repeat = 0u; repeat < repeats; repeat++) {
             samples[repeat] = br_btb_sample(count, iterations);
@@ -721,6 +880,63 @@ lb_status_t br_btb_run(const lb_cfg_t *cfg)
         tty_header(cfg, "  BTB / L1i capacity: beyond %zu targets",
                    BR_BTB_COUNTS[BR_BTB_COUNT_COUNT - 1u]);
         tty_csv_row(cfg, "branch,btb,capacity,%zu,targets", BR_BTB_COUNTS[BR_BTB_COUNT_COUNT - 1u]);
+    }
+
+    for (index = 0u; index < BR_BTB_SITE_COUNT_COUNT; index++) {
+        const size_t count = BR_BTB_SITE_COUNTS[index];
+        const size_t blocks = count / (size_t)BR_BTB_SITE_BLOCK_SITES;
+        uint64_t iterations = calls / (uint64_t)count;
+        double samples[BR_BTB_REPEATS] = {0.0};
+        size_t repeat = 0u;
+
+        if (iterations < 64u) {
+            iterations = 64u;
+        }
+        (void)br_btb_sites_walk(blocks, iterations / 8u);
+        for (repeat = 0u; repeat < repeats; repeat++) {
+            samples[repeat] = br_btb_sites_sample(blocks, iterations);
+        }
+        lb_bench_cool(cfg);
+        site_ns[index] = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
+    }
+
+    base_ns = site_ns[0];
+    for (index = 0u; index < BR_BTB_SITE_COUNT_COUNT; index++) {
+        site_delta[index] =
+            (base_ns > 0.0) ? (((site_ns[index] - base_ns) / base_ns) * 100.0) : 0.0;
+    }
+
+    tty_blank(cfg);
+    tty_header(cfg, "  Callsites (distinct indirect PCs)");
+    tty_header(cfg, "  %9s %12s %10s", "Sites", "ns/call", "delta");
+    for (index = 0u; index < BR_BTB_SITE_COUNT_COUNT; index++) {
+        const size_t count = BR_BTB_SITE_COUNTS[index];
+
+        if (!site_threshold_found && index > 0u && site_delta[index] >= BR_BTB_JUMP_PCT) {
+            const bool sustained = ((index + 1u) >= BR_BTB_SITE_COUNT_COUNT) ||
+                                   (site_delta[index + 1u] >= BR_BTB_SUSTAIN_PCT);
+
+            if (sustained) {
+                site_threshold_found = true;
+                site_threshold_index = index;
+            }
+        }
+
+        tty_header(cfg, "  %9zu %12.4f %9.1f%%", count, site_ns[index], site_delta[index]);
+        tty_csv_row(cfg, "branch,btb,sites_%zu,%.4f,%.2f", count, site_ns[index],
+                    site_delta[index]);
+    }
+
+    if (site_threshold_found) {
+        tty_header(cfg, "  Callsite capacity: ~%zu sites (next count +%.0f%%)",
+                   BR_BTB_SITE_COUNTS[site_threshold_index - 1u], BR_BTB_JUMP_PCT);
+        tty_csv_row(cfg, "branch,btb,callsite_capacity,%zu,sites",
+                    BR_BTB_SITE_COUNTS[site_threshold_index - 1u]);
+    } else {
+        tty_header(cfg, "  Callsite capacity: beyond %zu sites",
+                   BR_BTB_SITE_COUNTS[BR_BTB_SITE_COUNT_COUNT - 1u]);
+        tty_csv_row(cfg, "branch,btb,callsite_capacity,%zu,sites",
+                    BR_BTB_SITE_COUNTS[BR_BTB_SITE_COUNT_COUNT - 1u]);
     }
 
     tty_blank(cfg);
