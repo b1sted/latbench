@@ -9,7 +9,7 @@ on:
         type: boolean
         default: true
       run_extra:
-        description: 'Run standalone probes (mem line, dram lat/bw, os swap, topo pingpong)'
+        description: 'Run standalone v0.2 probes (mem, core, branch, dram, topo, os swap)'
         required: false
         type: boolean
         default: false
@@ -78,23 +78,40 @@ jobs:
           } > build/riscv64-auto.txt 2>&1
           ./build/bin/latbench auto --csv > build/riscv64-passport.csv
 
-      - name: Optional extra probes
+      - name: Optional standalone v0.2 probes
         if: ${{ inputs.run_extra }}
         run: |
           set -eu
-          {
-            ./build/bin/latbench mem line --no-color
-            ./build/bin/latbench dram lat --no-color
-            ./build/bin/latbench dram bw --no-color
-            ./build/bin/latbench topo pingpong --no-color
-            ./build/bin/latbench os swap --no-color
-          } > build/riscv64-extra.txt 2>&1
+          OUT="build/riscv64-extra.txt"
+          : > "$OUT"
+          for probe in \
+            "mem size" \
+            "mem line" \
+            "core stlf" \
+            "branch rsb" \
+            "branch btb" \
+            "dram lat" \
+            "dram bw" \
+            "dram bw --threads 2" \
+            "dram row" \
+            "topo falseshare" \
+            "topo pingpong --mode flag" \
+            "topo pingpong --mode cas" \
+            "os swap"; do
+            echo "=== latbench $probe ===" >> "$OUT"
+            # shellcheck disable=SC2086
+            ./build/bin/latbench $probe --no-color >> "$OUT" 2>&1
+          done
+          if command -v taskset >/dev/null 2>&1; then
+            echo "=== sparse cpuset (0,2): topo pingpong ===" >> "$OUT"
+            taskset -c 0,2 ./build/bin/latbench topo pingpong --no-color >> "$OUT" 2>&1
+          fi
 
       - name: Write job summary
         if: always()
         run: |
           set -eu
-          for f in build/riscv64-env.txt build/riscv64-auto.txt build/riscv64-extra.txt; do
+          for f in build/riscv64-env.txt build/riscv64-auto.txt; do
             if [ -f "$f" ]; then
               {
                 echo "### $f"
@@ -104,6 +121,26 @@ jobs:
               } >> "$GITHUB_STEP_SUMMARY"
             fi
           done
+          if [ -s build/riscv64-extra.txt ]; then
+            {
+              echo "<details><summary>Standalone v0.2 probes (riscv64-extra.txt)</summary>"
+              echo ""
+              echo '```text'
+              cat build/riscv64-extra.txt
+              echo '```'
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -s build/riscv64-passport.csv ]; then
+            {
+              echo "<details><summary>Passport CSV</summary>"
+              echo ""
+              echo '```csv'
+              cat build/riscv64-passport.csv
+              echo '```'
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload artifacts
         if: always()
