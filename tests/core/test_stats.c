@@ -428,6 +428,75 @@ static void test_detect_flat_plateau(void)
     check_true(steps.count == 0u, "slightly noisy plateau reports no steps");
 }
 
+static void test_detect_noisy_first_point_flat(void)
+{
+    enum { POINT_COUNT = 16 };
+    size_t x[POINT_COUNT] = {0u};
+    double latency[POINT_COUNT] = {0.0};
+    stats_steps_t steps = {0};
+    size_t i = 0u;
+
+    build_log_x(x, POINT_COUNT, 10u);
+
+    for (i = 0u; i < POINT_COUNT; i++) {
+        latency[i] = 5.0;
+    }
+    latency[0] = 1.0;
+    check_true(stats_detect_steps(x, latency, POINT_COUNT, &steps) == LB_STATUS_OK,
+               "flat curve with a low first point succeeds");
+    check_true(steps.count == 0u, "flat curve ignores a low first-point outlier");
+
+    for (i = 0u; i < POINT_COUNT; i++) {
+        latency[i] = 5.0;
+    }
+    latency[0] = 20.0;
+    check_true(stats_detect_steps(x, latency, POINT_COUNT, &steps) == LB_STATUS_OK,
+               "flat curve with a high first point succeeds");
+    check_true(steps.count == 0u, "flat curve ignores a high first-point outlier");
+}
+
+static void test_detect_noisy_first_point_with_real_steps(void)
+{
+    enum { POINT_COUNT = 16 };
+    size_t x[POINT_COUNT] = {0u};
+    double latency[POINT_COUNT] = {0.0};
+    stats_steps_t steps = {0};
+    size_t i = 0u;
+
+    build_log_x(x, POINT_COUNT, 10u);
+    for (i = 0u; i < POINT_COUNT; i++) {
+        if (x[i] <= 32768u) {
+            latency[i] = 4.0;
+        } else if (x[i] <= 262144u) {
+            latency[i] = 12.0;
+        } else {
+            latency[i] = 40.0;
+        }
+    }
+
+    latency[0] = 1.0;
+    check_true(stats_detect_steps(x, latency, POINT_COUNT, &steps) == LB_STATUS_OK,
+               "two-level curve with a low first point succeeds");
+    check_true(steps.count == 2u, "low first-point noise does not add a step");
+    if (steps.count == 2u) {
+        check_true(steps.items[0].x_lower == 32768u && steps.items[0].x_upper == 65536u,
+                   "first real step lands on the 32-64 KiB boundary");
+        check_true(steps.items[1].x_lower == 262144u && steps.items[1].x_upper == 524288u,
+                   "second real step lands on the 256-512 KiB boundary");
+    }
+
+    latency[0] = 20.0;
+    check_true(stats_detect_steps(x, latency, POINT_COUNT, &steps) == LB_STATUS_OK,
+               "two-level curve with a high first point succeeds");
+    check_true(steps.count == 2u, "high first-point noise does not add a step");
+    if (steps.count == 2u) {
+        check_true(steps.items[0].x_lower == 32768u && steps.items[0].x_upper == 65536u,
+                   "first real step survives a high first point");
+        check_true(steps.items[1].x_lower == 262144u && steps.items[1].x_upper == 524288u,
+                   "second real step survives a high first point");
+    }
+}
+
 static void test_detect_validation(void)
 {
     const size_t x[4] = {1u, 2u, 2u, 4u};
@@ -558,6 +627,8 @@ int main(void)
     test_detect_smooth_slope();
     test_detect_noisy_gradual();
     test_detect_flat_plateau();
+    test_detect_noisy_first_point_flat();
+    test_detect_noisy_first_point_with_real_steps();
     test_detect_validation();
     test_series();
     test_series_summary();
