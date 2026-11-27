@@ -42,6 +42,7 @@ static const lb_auto_probe_t AUTO_PROBES[] = {
     {"branch", "rsb", br_rsb_run},
     {"branch", "btb", br_btb_run},
     {"dram", "bw", dram_bw_run},
+    {"dram", "lat", dram_lat_run},
     {"dram", "row", dram_row_run},
     {"topo", "atomic", topo_atomic_run},
     {"topo", "falseshare", topo_falseshare_run},
@@ -89,7 +90,7 @@ static void auto_print_passport(const lb_cfg_t *cfg, const lb_passport_t *p)
     char l1[LB_NAME_MAX] = {0};
     char l2[LB_NAME_MAX] = {0};
     char l3[LB_NAME_MAX] = {0};
-    char cache[LB_LINE_MAX] = {0};
+    char cache[LB_LINE_MAX * 3u] = {0};
 
     tty_section(cfg, "Passport");
 
@@ -112,7 +113,11 @@ static void auto_print_passport(const lb_cfg_t *cfg, const lb_passport_t *p)
     tty_header(cfg, "  Cache/TLB");
     if (p->l1d_bytes > 0u) {
         (void)tty_format_bytes(p->l1d_bytes, l1, sizeof(l1));
-        tty_kv(cfg, "L1d est.", "~%s", l1);
+        if (p->l1d_ns > 0.0) {
+            tty_kv(cfg, "L1d est.", "~%s (%.2f ns)", l1, p->l1d_ns);
+        } else {
+            tty_kv(cfg, "L1d est.", "~%s", l1);
+        }
     } else {
         tty_kv(cfg, "L1d est.", "not detected");
     }
@@ -121,16 +126,31 @@ static void auto_print_passport(const lb_cfg_t *cfg, const lb_passport_t *p)
     } else {
         tty_kv(cfg, "L1d ways", "not detected");
     }
-    (void)tty_format_bytes(p->l2_bytes, l2, sizeof(l2));
-    (void)tty_format_bytes(p->l3_bytes, l3, sizeof(l3));
-    if (p->l2_bytes > 0u && p->l3_bytes > 0u) {
-        (void)snprintf(cache, sizeof(cache), "~%s / ~%s", l2, l3);
-    } else if (p->l2_bytes > 0u) {
-        (void)snprintf(cache, sizeof(cache), "~%s / not detected", l2);
-    } else if (p->l3_bytes > 0u) {
-        (void)snprintf(cache, sizeof(cache), "not detected / ~%s", l3);
-    } else {
-        (void)snprintf(cache, sizeof(cache), "not detected");
+    {
+        char l2_part[LB_LINE_MAX] = {0};
+        char l3_part[LB_LINE_MAX] = {0};
+
+        (void)tty_format_bytes(p->l2_bytes, l2, sizeof(l2));
+        (void)tty_format_bytes(p->l3_bytes, l3, sizeof(l3));
+        if (p->l2_bytes > 0u) {
+            if (p->l2_ns > 0.0) {
+                (void)snprintf(l2_part, sizeof(l2_part), "~%s (%.2f ns)", l2, p->l2_ns);
+            } else {
+                (void)snprintf(l2_part, sizeof(l2_part), "~%s", l2);
+            }
+        } else {
+            (void)snprintf(l2_part, sizeof(l2_part), "not detected");
+        }
+        if (p->l3_bytes > 0u) {
+            if (p->l3_ns > 0.0) {
+                (void)snprintf(l3_part, sizeof(l3_part), "~%s (%.2f ns)", l3, p->l3_ns);
+            } else {
+                (void)snprintf(l3_part, sizeof(l3_part), "~%s", l3);
+            }
+        } else {
+            (void)snprintf(l3_part, sizeof(l3_part), "not detected");
+        }
+        (void)snprintf(cache, sizeof(cache), "%s / %s", l2_part, l3_part);
     }
     tty_kv(cfg, "L2/L3 est.", "%s", cache);
     if (p->coherence_line_bytes > 0u) {
@@ -187,6 +207,11 @@ static void auto_print_passport(const lb_cfg_t *cfg, const lb_passport_t *p)
         tty_kv(cfg, "Read/Write BW", "%.2f / %.2f GiB/s", p->dram_read_gibs, p->dram_write_gibs);
     } else {
         tty_kv(cfg, "Read/Write BW", "not detected");
+    }
+    if (p->ram_ns > 0.0) {
+        tty_kv(cfg, "RAM lat", "%.2f ns", p->ram_ns);
+    } else {
+        tty_kv(cfg, "RAM lat", "not detected");
     }
     if (p->row_delta_ns != 0.0 || p->row_delta_pct != 0.0) {
         tty_kv(cfg, "Row conflict delta", "%+.2f ns (%+.1f%%)", p->row_delta_ns, p->row_delta_pct);
@@ -249,6 +274,10 @@ static void auto_publish_csv(const lb_cfg_t *cfg, const lb_passport_t *p)
     tty_csv_row(cfg, "auto,passport,l1d_ways,%" PRIu32 ",ways", p->l1d_ways);
     tty_csv_row(cfg, "auto,passport,l2,%" PRIu64 ",bytes", p->l2_bytes);
     tty_csv_row(cfg, "auto,passport,l3,%" PRIu64 ",bytes", p->l3_bytes);
+    tty_csv_row(cfg, "auto,passport,l1d_ns,%.3f,ns", p->l1d_ns);
+    tty_csv_row(cfg, "auto,passport,l2_ns,%.3f,ns", p->l2_ns);
+    tty_csv_row(cfg, "auto,passport,l3_ns,%.3f,ns", p->l3_ns);
+    tty_csv_row(cfg, "auto,passport,ram_ns,%.3f,ns", p->ram_ns);
     tty_csv_row(cfg, "auto,passport,coherence_line,%" PRIu32 ",bytes", p->coherence_line_bytes);
     tty_csv_row(cfg, "auto,passport,l1dtlb,%" PRIu32 ",entries", p->l1dtlb_entries);
     tty_csv_row(cfg, "auto,passport,alu_ilp_chains,%" PRIu32 ",chains", p->alu_ilp_chains);
@@ -300,6 +329,19 @@ lb_status_t lb_auto_run(const lb_cfg_t *cfg)
      */
     run.os_ctx_mode = LB_OS_CTX_BOTH;
     run.runtime_applied = false;
+    /*
+     * On Linux with THP available, let the auto profile use huge pages even
+     * though the standalone default is --no-thp. This keeps mem size from
+     * smearing L2/L3 and ram_ns with 4K TLB misses, while an explicit
+     * --no-thp/--thp from the user keeps priority.
+     */
+    if (!cfg->thp_set) {
+        const lb_thp_mode_t thp = pal_thp_mode();
+
+        if (thp == LB_THP_ALWAYS || thp == LB_THP_MADVISE) {
+            run.no_thp = false;
+        }
+    }
     auto_apply_runtime(&run);
 
     lb_passport_reset();

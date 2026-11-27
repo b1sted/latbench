@@ -184,12 +184,22 @@ static void mem_publish_cache_steps(const stats_steps_t *steps)
     }
     if (steps->count > 0u) {
         passport->l1d_bytes = (uint64_t)steps->items[0].x;
+        passport->l1d_ns = steps->items[0].lower_ns;
     }
     if (steps->count > 1u) {
         passport->l2_bytes = (uint64_t)steps->items[1].x;
+        passport->l2_ns = steps->items[1].lower_ns;
     }
     if (steps->count > 2u) {
         passport->l3_bytes = (uint64_t)steps->items[2].x;
+        passport->l3_ns = steps->items[2].lower_ns;
+    }
+    /*
+     * Fallback only: dram lat overwrites ram_ns with an exact DRAM figure when
+     * it runs later in the auto profile.
+     */
+    if (passport->ram_ns == 0.0 && steps->count > 0u) {
+        passport->ram_ns = steps->items[steps->count - 1u].upper_ns;
     }
 }
 
