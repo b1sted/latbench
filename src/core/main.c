@@ -608,6 +608,9 @@ static void print_module_options(const lb_cfg_t *cfg, const lb_module_t *module)
     if (strcmp(module->name, "os") == 0) {
         help_line(cfg, "--mode <mode>", "context switch mode (thread|proc, default both)");
     }
+    if (strcmp(module->name, "dram") == 0) {
+        help_line(cfg, "--threads <n>", "worker threads for dram bw (default: auto)");
+    }
 
     help_line(cfg, "--csv", "emit CSV to stdout; diagnostics to stderr");
     help_line(cfg, "--no-color", "disable color output");
@@ -642,6 +645,7 @@ static void print_help(const lb_cfg_t *cfg)
     help_line(cfg, "--write", "modify words during mem size walk (dirty write-back)");
     help_line(cfg, "--long", "extend sys throttle duration to 10 seconds");
     help_line(cfg, "--mode <mode>", "handoff/switch mode (cas|flag, thread|proc)");
+    help_line(cfg, "--threads <n>", "worker threads for dram bw (default: auto)");
     help_line(cfg, "--no-timing", "skip selftest ratio thresholds (for emulators)");
     help_line(cfg, "--csv", "emit CSV to stdout; diagnostics to stderr");
     help_line(cfg, "--no-color", "disable color output");
@@ -793,6 +797,7 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
     const char *positionals[2] = {NULL, NULL};
     int positional_count = 0;
     int i = 0;
+    bool threads_set = false;
 
     *mode_set = false;
     *mode_is_topo = false;
@@ -875,7 +880,7 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
 
         if (strcmp(arg, "--cpu") == 0 || strcmp(arg, "--qos") == 0 ||
             strcmp(arg, "--max-mem") == 0 || strcmp(arg, "--batch-ms") == 0 ||
-            strcmp(arg, "--cool-ms") == 0) {
+            strcmp(arg, "--cool-ms") == 0 || strcmp(arg, "--threads") == 0) {
             const char *value = NULL;
 
             if (i + 1 >= argc) {
@@ -901,6 +906,15 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
                 if (parse_u32_option(arg, value, &cfg->batch_ms) != LB_STATUS_OK) {
                     return LB_STATUS_INVALID_ARG;
                 }
+            } else if (strcmp(arg, "--threads") == 0) {
+                if (parse_u32_option(arg, value, &cfg->threads) != LB_STATUS_OK) {
+                    return LB_STATUS_INVALID_ARG;
+                }
+                if (cfg->threads == 0u) {
+                    tty_err("invalid value for --threads: '%s' (must be >= 1)", value);
+                    return LB_STATUS_INVALID_ARG;
+                }
+                threads_set = true;
             } else {
                 if (parse_u32_option(arg, value, &cfg->cool_ms) != LB_STATUS_OK) {
                     return LB_STATUS_INVALID_ARG;
@@ -924,6 +938,14 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
 
     *module_name = positionals[0];
     *subtest_name = positionals[1];
+
+    if (threads_set && !*show_help) {
+        if (positionals[0] == NULL || positionals[1] == NULL ||
+            strcmp(positionals[0], "dram") != 0 || strcmp(positionals[1], "bw") != 0) {
+            tty_err("--threads is only valid for 'dram bw'");
+            return LB_STATUS_INVALID_ARG;
+        }
+    }
     return LB_STATUS_OK;
 }
 
@@ -948,6 +970,7 @@ int main(int argc, char **argv)
     cfg.cool_ms = LB_DEFAULT_COOL_MS;
     cfg.no_thp = true;
     cfg.thp_set = false;
+    cfg.threads = 0u;
     cfg.csv = false;
     cfg.no_color = false;
     cfg.write = false;
