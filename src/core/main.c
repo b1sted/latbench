@@ -24,8 +24,8 @@
 
 #define LB_SELFTEST_MAX_NODES 4096u
 #define LB_SELFTEST_CHAIN_NODES 4096u
-#define LB_SELFTEST_CHASE_BASE UINT64_C(1048576)
-#define LB_SELFTEST_CHASE_ROUNDS 3u
+#define LB_SELFTEST_CHASE_BASE UINT64_C(2097152)
+#define LB_SELFTEST_CHASE_ROUNDS 5u
 #define LB_SELFTEST_RATIO_MIN 1.6
 
 /* Branch sanity: an unpredictable 50/50 pattern must pay a mispredict penalty. */
@@ -287,7 +287,7 @@ static bool lb_selftest_chase_check(const lb_cfg_t *cfg)
     }
 
     /* Warm the chain, its cache lines, and the clock path before timing. */
-    (void)lb_selftest_chase(&nodes[0], (uint64_t)LB_SELFTEST_CHAIN_NODES);
+    (void)lb_selftest_chase(&nodes[0], base_hops);
 
     for (round = 0u; round < LB_SELFTEST_CHASE_ROUNDS; round++) {
         uint64_t begin = pal_now_ns();
