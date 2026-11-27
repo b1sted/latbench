@@ -107,22 +107,6 @@ static bool tty_color_enabled(const lb_cfg_t *cfg, const FILE *stream)
     return pal_is_tty(stream == stderr);
 }
 
-static void tty_vline(FILE *stream, const char *prefix, const char *fmt, va_list args)
-    PAL_PRINTF_FORMAT(3, 0);
-
-static void tty_vline(FILE *stream, const char *prefix, const char *fmt, va_list args)
-{
-    if (fmt == NULL) {
-        return;
-    }
-
-    if (prefix != NULL) {
-        (void)fputs(prefix, stream);
-    }
-    (void)vfprintf(stream, fmt, args);
-    (void)fputc('\n', stream);
-}
-
 void tty_set_no_color(bool no_color)
 {
     g_tty_no_color = no_color;
@@ -145,7 +129,8 @@ void tty_header(const lb_cfg_t *cfg, const char *fmt, ...)
 
     stream = tty_info_stream(cfg);
     va_start(args, fmt);
-    tty_vline(stream, NULL, fmt, args);
+    (void)vfprintf(stream, fmt, args);
+    (void)fputc('\n', stream);
     va_end(args);
 }
 
@@ -198,7 +183,8 @@ void tty_kv(const lb_cfg_t *cfg, const char *key, const char *fmt, ...)
     (void)fprintf(stream, "  %-*s ", TTY_KEY_WIDTH, key);
 
     va_start(args, fmt);
-    tty_vline(stream, NULL, fmt, args);
+    (void)vfprintf(stream, fmt, args);
+    (void)fputc('\n', stream);
     va_end(args);
 }
 
@@ -216,7 +202,8 @@ void tty_csv_row(const lb_cfg_t *cfg, const char *fmt, ...)
     }
 
     va_start(args, fmt);
-    tty_vline(stdout, NULL, fmt, args);
+    (void)vfprintf(stdout, fmt, args);
+    (void)fputc('\n', stdout);
     va_end(args);
 }
 
@@ -231,18 +218,16 @@ void tty_progress(const lb_cfg_t *cfg, const char *fmt, ...)
 
     stream = tty_info_stream(cfg);
     va_start(args, fmt);
-    tty_vline(stream, NULL, fmt, args);
+    (void)vfprintf(stream, fmt, args);
+    (void)fputc('\n', stream);
     va_end(args);
 }
 
-static void tty_status(const char *color, const char *prefix, const char *fmt, va_list args)
-    PAL_PRINTF_FORMAT(3, 0);
-
-static void tty_status(const char *color, const char *prefix, const char *fmt, va_list args)
+static void tty_status_prefix(const char *color, const char *prefix)
 {
     bool use_color = false;
 
-    if (fmt == NULL) {
+    if (prefix == NULL) {
         return;
     }
 
@@ -254,7 +239,6 @@ static void tty_status(const char *color, const char *prefix, const char *fmt, v
     if (use_color) {
         (void)fputs(TTY_ANSI_RESET, stderr);
     }
-    tty_vline(stderr, NULL, fmt, args);
 }
 
 void tty_warn(const char *fmt, ...)
@@ -265,8 +249,10 @@ void tty_warn(const char *fmt, ...)
         return;
     }
 
+    tty_status_prefix(TTY_ANSI_WARN, "[WARN] ");
     va_start(args, fmt);
-    tty_status(TTY_ANSI_WARN, "[WARN] ", fmt, args);
+    (void)vfprintf(stderr, fmt, args);
+    (void)fputc('\n', stderr);
     va_end(args);
 }
 
@@ -278,8 +264,10 @@ void tty_err(const char *fmt, ...)
         return;
     }
 
+    tty_status_prefix(TTY_ANSI_ERROR, "[ERROR] ");
     va_start(args, fmt);
-    tty_status(TTY_ANSI_ERROR, "[ERROR] ", fmt, args);
+    (void)vfprintf(stderr, fmt, args);
+    (void)fputc('\n', stderr);
     va_end(args);
 }
 
@@ -552,7 +540,11 @@ static void tty_csv_field(const char *text, char *out, size_t capacity)
     while (text[i] != '\0' && (i + 1u) < capacity) {
         const char c = text[i];
 
-        out[i] = (c == ',' || c == '\n' || c == '\r') ? '_' : c;
+        if (c == ',' || c == '\n' || c == '\r') {
+            out[i] = '_';
+        } else {
+            out[i] = c;
+        }
         i++;
     }
     out[i] = '\0';
