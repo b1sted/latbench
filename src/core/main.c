@@ -111,6 +111,7 @@ static const lb_subtest_t OS_SUBTESTS[] = {
     {"fork", "fork, child _exit(0), and parent waitpid cost", os_fork_run},
     {"sig", "self-delivered SIGUSR1 signal round trip", os_sig_run},
     {"sleep", "nanosleep overshoot at 1 us and 100 us targets", os_sleep_run},
+    {"swap", "pageout via MADV_PAGEOUT and random swap-in fault latency", os_swap_run},
 };
 
 static const lb_module_t BENCH_MODULES[] = {
