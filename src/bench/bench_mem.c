@@ -616,7 +616,17 @@ static size_t mem_line_estimate(const stats_series_t *series)
         }
     }
 
-    base = summaries[0].p10_ns;
+    /*
+     * Use the lowest of the sub-line offsets as the baseline so a single noisy
+     * 8-byte sample cannot inflate the threshold and fake a wider line.
+     */
+    for (index = 0u; index < count && index < 3u; index++) {
+        const double p10 = summaries[index].p10_ns;
+
+        if (MEM_LINE_STEPS[index] < 64u && p10 > 0.0 && (base <= 0.0 || p10 < base)) {
+            base = p10;
+        }
+    }
     if (!(base > 0.0)) {
         return 0u;
     }
@@ -625,6 +635,13 @@ static size_t mem_line_estimate(const stats_series_t *series)
         const double p10 = summaries[index].p10_ns;
 
         if (MEM_LINE_STEPS[index] < (size_t)MEM_LINE_DETECT_MIN_STRIDE) {
+            continue;
+        }
+        /*
+         * Real cache lines top out at 128 B. The 256 B step only confirms that
+         * a plateau holds and must never be reported as the line size.
+         */
+        if (MEM_LINE_STEPS[index] > 128u) {
             continue;
         }
         if (!(p10 >= (base * MEM_LINE_JUMP_RATIO))) {

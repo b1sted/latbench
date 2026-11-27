@@ -17,7 +17,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <time.h>
 
 #include <sched.h>
@@ -227,6 +226,27 @@ bool pal_ilp_scaling_expected(void)
 #endif
 }
 
+static bool pal_linux_contains(const char *haystack, const char *needle)
+{
+    size_t i = 0u;
+
+    if (haystack == NULL || needle == NULL || needle[0] == '\0') {
+        return false;
+    }
+
+    for (i = 0u; haystack[i] != '\0'; i++) {
+        size_t j = 0u;
+
+        while (needle[j] != '\0' && haystack[i + j] == needle[j]) {
+            j++;
+        }
+        if (needle[j] == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
 lb_thp_mode_t pal_thp_mode(void)
 {
     FILE *file = fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r");
@@ -236,12 +256,12 @@ lb_thp_mode_t pal_thp_mode(void)
     if (file == NULL) {
         return LB_THP_UNSUPPORTED;
     }
-    if (fgets(line, (int)sizeof(line), file) != NULL) {
-        if (strstr(line, "[always]") != NULL) {
+    if (fgets(line, (int)sizeof(line), file)) {
+        if (pal_linux_contains(line, "[always]")) {
             mode = LB_THP_ALWAYS;
-        } else if (strstr(line, "[madvise]") != NULL) {
+        } else if (pal_linux_contains(line, "[madvise]")) {
             mode = LB_THP_MADVISE;
-        } else if (strstr(line, "[never]") != NULL) {
+        } else if (pal_linux_contains(line, "[never]")) {
             mode = LB_THP_NEVER;
         }
     }
@@ -423,9 +443,9 @@ static uint64_t pal_linux_xorshift64(uint64_t *state)
 {
     uint64_t value = *state;
 
-    value ^= value >> 12;
-    value ^= value << 25;
-    value ^= value >> 27;
+    value ^= value >> 12u;
+    value ^= value << 25u;
+    value ^= value >> 27u;
     *state = value;
     return value * UINT64_C(2685821657736338717);
 }

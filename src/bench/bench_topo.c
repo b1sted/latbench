@@ -323,17 +323,18 @@ static uint32_t topo_fs_estimate_line(const double *samples, size_t count)
      * cannot make a 128-byte SoC report a false 64-byte line.
      */
     for (i = 0u; i < count; i++) {
+        const double plateau_limit = best * 1.30;
         size_t j = 0u;
         bool plateau = true;
 
         if (TOPO_FS_OFFSETS[i] < 32u) {
             continue;
         }
-        if (!(samples[i] <= best * 1.15)) {
+        if (!(samples[i] <= plateau_limit)) {
             continue;
         }
         for (j = i + 1u; j < count; j++) {
-            if (!(samples[j] <= best * 1.25)) {
+            if (!(samples[j] <= best * 1.35)) {
                 plateau = false;
                 break;
             }
@@ -417,20 +418,105 @@ static bool topo_fs_step(topo_fs_ctx_t *ctx_a, topo_fs_ctx_t *ctx_b, uint32_t *r
     return ok;
 }
 
+static bool topo_fs_has_drop(const double *samples, size_t count)
+{
+    double best = 0.0;
+    size_t i = 0u;
+
+    if (samples == NULL || count == 0u || !(samples[0] > 0.0)) {
+        return false;
+    }
+    best = samples[0];
+    for (i = 1u; i < count; i++) {
+        if (samples[i] > 0.0 && samples[i] < best) {
+            best = samples[i];
+        }
+    }
+    return best < samples[0] * 0.8;
+}
+
+/*
+ * Measure every offset for one CPU pair. Printing is left to the caller so the
+ * table header can wait until the final pair is known.
+ */
+static lb_status_t topo_fs_measure_pair(uint8_t *base, uint32_t cpu_a, uint32_t cpu_b,
+                                        uint32_t batch_ms, bool pin, bool *out_pin_ok,
+                                        double *samples)
+{
+    uint32_t stop = 0u;
+    uint32_t ready = 0u;
+    uint32_t go = 0u;
+    size_t offset_index = 0u;
+
+    if (base == NULL || out_pin_ok == NULL || samples == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+    *out_pin_ok = true;
+
+    for (offset_index = 0u; offset_index < (size_t)TOPO_FS_OFFSET_COUNT; offset_index++) {
+        const size_t offset = TOPO_FS_OFFSETS[offset_index];
+        uint64_t *counter_a = (uint64_t *)(void *)(base);
+        uint64_t *counter_b = (uint64_t *)(void *)(base + offset);
+        double repeat_samples[TOPO_FS_REPEATS] = {0.0};
+        size_t repeat = 0u;
+
+        for (repeat = 0u; repeat < (size_t)TOPO_FS_REPEATS; repeat++) {
+            topo_fs_ctx_t ctx_a = {0};
+            topo_fs_ctx_t ctx_b = {0};
+            bool step_ok = false;
+            bool step_pin_ok = true;
+            uint32_t attempt = 0u;
+
+            ctx_a.counter = counter_a;
+            ctx_a.ready = &ready;
+            ctx_a.go = &go;
+            ctx_a.stop = &stop;
+            ctx_b.counter = counter_b;
+            ctx_b.ready = &ready;
+            ctx_b.go = &go;
+            ctx_b.stop = &stop;
+
+            /*
+             * A throttled scheduler can still starve a freshly spawned worker.
+             * Retry the whole handshake a couple of times before giving up.
+             */
+            for (attempt = 0u; attempt < TOPO_FS_ATTEMPTS && !step_ok; attempt++) {
+                *counter_a = 0u;
+                *counter_b = 0u;
+                ctx_a.iterations = 0u;
+                ctx_b.iterations = 0u;
+                step_pin_ok = true;
+                step_ok = topo_fs_step(&ctx_a, &ctx_b, &ready, &go, &stop, batch_ms, pin, cpu_a,
+                                       cpu_b, &step_pin_ok);
+            }
+            if (!step_ok) {
+                return LB_STATUS_ERROR;
+            }
+            if (pin && !step_pin_ok) {
+                *out_pin_ok = false;
+            }
+
+            repeat_samples[repeat] = (((double)ctx_a.elapsed_ns / (double)ctx_a.iterations) +
+                                      ((double)ctx_b.elapsed_ns / (double)ctx_b.iterations)) *
+                                     0.5;
+        }
+
+        samples[offset_index] =
+            stats_percentile(repeat_samples, (size_t)TOPO_FS_REPEATS, STATS_NOISE_PERCENTILE);
+    }
+    return LB_STATUS_OK;
+}
+
 lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
 {
     const uint32_t cpu_count = pal_cpu_count();
     pal_mem_t *arena = NULL;
     uint8_t *base = NULL;
-    uint32_t stop = 0u;
-    uint32_t ready = 0u;
-    uint32_t go = 0u;
     uint32_t cpu_a = 0u;
     uint32_t cpu_b = 1u;
     uint32_t batch_ms = 0u;
     bool pin = false;
-    bool pin_warned = false;
-    bool header_printed = false;
+    bool pin_ok = true;
     double samples[TOPO_FS_OFFSET_COUNT] = {0.0};
     uint32_t line_bytes = 0u;
     uint64_t baseline = 0u;
@@ -476,80 +562,66 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
 
     baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
-    for (offset_index = 0u; offset_index < (size_t)TOPO_FS_OFFSET_COUNT; offset_index++) {
-        const size_t offset = TOPO_FS_OFFSETS[offset_index];
-        uint64_t *counter_a = (uint64_t *)(void *)(base);
-        uint64_t *counter_b = (uint64_t *)(void *)(base + offset);
-        double repeat_samples[TOPO_FS_REPEATS] = {0.0};
-        size_t repeat = 0u;
+    status = topo_fs_measure_pair(base, cpu_a, cpu_b, batch_ms, pin, &pin_ok, samples);
+    if (status != LB_STATUS_OK) {
+        tty_err("false-sharing workers produced no samples");
+        goto cleanup;
+    }
+    line_bytes = topo_fs_estimate_line(samples, (size_t)TOPO_FS_OFFSET_COUNT);
 
-        for (repeat = 0u; repeat < (size_t)TOPO_FS_REPEATS; repeat++) {
-            topo_fs_ctx_t ctx_a = {0};
-            topo_fs_ctx_t ctx_b = {0};
-            bool step_ok = false;
-            bool step_pin_ok = true;
-            uint32_t attempt = 0u;
+    /*
+     * On Intel Hyper-Threading the first two CPUs often share one physical
+     * core, so their counters never contend. If that pair found no line, retry
+     * once on CPUs 0 and 2 before giving up.
+     */
+    if (cfg->cpu_id < 0 && pin && line_bytes == 0u) {
+        int32_t cpus[TOPO_PP_MAX_CPUS] = {0};
+        size_t avail = 0u;
 
-            ctx_a.counter = counter_a;
-            ctx_a.ready = &ready;
-            ctx_a.go = &go;
-            ctx_a.stop = &stop;
-            ctx_b.counter = counter_b;
-            ctx_b.ready = &ready;
-            ctx_b.go = &go;
-            ctx_b.stop = &stop;
+        if (pal_cpu_list(cpus, (size_t)TOPO_PP_MAX_CPUS, &avail) == LB_STATUS_OK && avail >= 3u &&
+            cpus[2] != (int32_t)cpu_a && cpus[2] != (int32_t)cpu_b) {
+            double alt_samples[TOPO_FS_OFFSET_COUNT] = {0.0};
+            bool alt_pin_ok = true;
+            lb_status_t alt_status =
+                topo_fs_measure_pair(base, (uint32_t)cpus[0], (uint32_t)cpus[2], batch_ms, pin,
+                                     &alt_pin_ok, alt_samples);
 
-            /*
-             * A throttled scheduler can still starve a freshly spawned worker.
-             * Retry the whole handshake a couple of times before giving up.
-             */
-            for (attempt = 0u; attempt < TOPO_FS_ATTEMPTS && !step_ok; attempt++) {
-                *counter_a = 0u;
-                *counter_b = 0u;
-                ctx_a.iterations = 0u;
-                ctx_b.iterations = 0u;
-                step_pin_ok = true;
-                step_ok = topo_fs_step(&ctx_a, &ctx_b, &ready, &go, &stop, batch_ms, pin, cpu_a,
-                                       cpu_b, &step_pin_ok);
-            }
-            if (!step_ok) {
-                tty_err("false-sharing workers produced no samples");
-                status = LB_STATUS_ERROR;
-                goto cleanup;
-            }
-            if (pin && !step_pin_ok && !pin_warned) {
-                tty_warn("CPU pinning was not applied to every false-sharing worker; "
-                         "treating the run as unpinned");
-                pin_warned = true;
-            }
-            if (!header_printed) {
-                if (pin && !pin_warned) {
-                    tty_kv(cfg, "Cores", "%" PRIu32 " and %" PRIu32 " (pinned)", cpu_a, cpu_b);
-                } else if (pin) {
-                    tty_kv(cfg, "Cores", "%" PRIu32 " and %" PRIu32 " (pin denied, unpinned)",
-                           cpu_a, cpu_b);
-                } else {
-                    tty_kv(cfg, "Cores", "2 threads, QoS perf (unpinned)");
+            if (alt_status == LB_STATUS_OK) {
+                const uint32_t alt_line =
+                    topo_fs_estimate_line(alt_samples, (size_t)TOPO_FS_OFFSET_COUNT);
+
+                if (alt_line != 0u || !topo_fs_has_drop(samples, (size_t)TOPO_FS_OFFSET_COUNT)) {
+                    cpu_a = (uint32_t)cpus[0];
+                    cpu_b = (uint32_t)cpus[2];
+                    pin_ok = alt_pin_ok;
+                    line_bytes = alt_line;
+                    (void)memcpy(samples, alt_samples, sizeof(samples));
                 }
-                tty_blank(cfg);
-                tty_header(cfg, "  %8s %14s", "Offset", "ns/op");
-                tty_csv_row(cfg, "topo,falseshare,offset_bytes,ns_per_op");
-                header_printed = true;
             }
-
-            repeat_samples[repeat] = (((double)ctx_a.elapsed_ns / (double)ctx_a.iterations) +
-                                      ((double)ctx_b.elapsed_ns / (double)ctx_b.iterations)) *
-                                     0.5;
         }
-
-        samples[offset_index] =
-            stats_percentile(repeat_samples, (size_t)TOPO_FS_REPEATS, STATS_NOISE_PERCENTILE);
-
-        tty_header(cfg, "  %6zu B %14.2f", offset, samples[offset_index]);
-        tty_csv_row(cfg, "topo,falseshare,%zu,%.2f", offset, samples[offset_index]);
     }
 
-    line_bytes = topo_fs_estimate_line(samples, (size_t)TOPO_FS_OFFSET_COUNT);
+    if (pin && !pin_ok) {
+        tty_warn("CPU pinning was not applied to every false-sharing worker; "
+                 "treating the run as unpinned");
+    }
+    if (pin && pin_ok) {
+        tty_kv(cfg, "Cores", "%" PRIu32 " and %" PRIu32 " (pinned)", cpu_a, cpu_b);
+    } else if (pin) {
+        tty_kv(cfg, "Cores", "%" PRIu32 " and %" PRIu32 " (pin denied, unpinned)", cpu_a, cpu_b);
+    } else {
+        tty_kv(cfg, "Cores", "2 threads, QoS perf (unpinned)");
+    }
+    tty_blank(cfg);
+    tty_header(cfg, "  %8s %14s", "Offset", "ns/op");
+    tty_csv_row(cfg, "topo,falseshare,offset_bytes,ns_per_op");
+
+    for (offset_index = 0u; offset_index < (size_t)TOPO_FS_OFFSET_COUNT; offset_index++) {
+        tty_header(cfg, "  %6zu B %14.2f", TOPO_FS_OFFSETS[offset_index], samples[offset_index]);
+        tty_csv_row(cfg, "topo,falseshare,%zu,%.2f", TOPO_FS_OFFSETS[offset_index],
+                    samples[offset_index]);
+    }
+
     lb_passport_mutable()->coherence_line_bytes = line_bytes;
     tty_blank(cfg);
     if (line_bytes == 0u) {
@@ -560,14 +632,12 @@ lb_status_t topo_falseshare_run(const lb_cfg_t *cfg)
 
     tty_blank(cfg);
     {
-        const bool warn_drift = pin && !pin_warned && (cfg->cpu_id >= 0);
+        const bool warn_drift = pin && pin_ok && (cfg->cpu_id >= 0);
 
         lb_bench_canary_finish(cfg, baseline, warn_drift);
     }
 
 cleanup:
-    pal_atomic_store_u32_relaxed(&go, 1u);
-    pal_atomic_store_u32_relaxed(&stop, 1u);
     pal_mem_free(arena);
     return status;
 }
