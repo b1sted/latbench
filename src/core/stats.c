@@ -608,6 +608,16 @@ static bool stats_find_gradual(const double *values, size_t begin, size_t end, d
         if (!stats_plateau_stable(values + i, STATS_STEP_WINDOW)) {
             continue;
         }
+        /*
+         * At the very start of a dense curve the first two points can be
+         * noisier than the rest. Require a stable lower window before the
+         * earliest gradual boundary so a pair of low points followed by a
+         * normal plateau does not look like a real level change.
+         */
+        if (begin == 0u && i == (size_t)STATS_STEP_WINDOW &&
+            !stats_plateau_stable(values + begin, STATS_STEP_WINDOW)) {
+            continue;
+        }
         ratio = upper / lower;
         if (!found || ratio > best_ratio) {
             best_ratio = ratio;
@@ -684,32 +694,54 @@ lb_status_t stats_detect_steps(const size_t *x, const double *latency_ns, size_t
      * physical transition: keep the first boundary as X_fit so it stays on the
      * lower plateau, and only move the measured upper edge when the second
      * point is stronger.
+     *
+     * Dense grids need three points on the starting plateau so an outlier at
+     * the first sample cannot create a false boundary. Short curves keep the
+     * earlier minimum because they have fewer points to spare.
      */
-    for (i = 1u; i < count; i++) {
-        if (!stats_jump_significant(smoothed[i - 1u], smoothed[i], min_jump)) {
-            continue;
-        }
-        /*
-         * A step needs at least three points on the upper side. A step that
-         * only appears in the last one or two grid points is a noisy arena
-         * ceiling, not a cache level.
-         */
-        if ((count - i) < 3u) {
-            continue;
-        }
-        if (smoothed[i + 2u] < (smoothed[i] * STATS_STEP_SUSTAIN_RATIO)) {
-            continue;
-        }
-        if (sharp_count > 0u && i == (sharp[sharp_count - 1u] + 1u)) {
-            if ((smoothed[i] / smoothed[i - 1u]) >
-                (smoothed[sharp[sharp_count - 1u]] / smoothed[sharp[sharp_count - 1u] - 1u])) {
-                sharp[sharp_count - 1u] = i;
+    {
+        const size_t min_start = (count >= 12u) ? 3u : 2u;
+
+        for (i = min_start; i < count; i++) {
+            if (!stats_jump_significant(smoothed[i - 1u], smoothed[i], min_jump)) {
+                continue;
             }
-            continue;
+            /*
+             * The first transition is also compared against the median of the
+             * lower window. A single spike or dip at x[0] or x[1] is ignored by
+             * that median, while a real low plateau still clears the ratio.
+             */
+            if (sharp_count == 0u) {
+                const size_t lower_begin =
+                    (i > (size_t)STATS_STEP_WINDOW) ? (i - (size_t)STATS_STEP_WINDOW) : 0u;
+                const double lower_med = stats_window_median(smoothed, lower_begin, i);
+
+                if (!stats_jump_significant(lower_med, smoothed[i], min_jump)) {
+                    continue;
+                }
+            }
+            /*
+             * A step needs at least three points on the upper side. A step that
+             * only appears in the last one or two grid points is a noisy arena
+             * ceiling, not a cache level.
+             */
+            if ((count - i) < 3u) {
+                continue;
+            }
+            if (smoothed[i + 2u] < (smoothed[i] * STATS_STEP_SUSTAIN_RATIO)) {
+                continue;
+            }
+            if (sharp_count > 0u && i == (sharp[sharp_count - 1u] + 1u)) {
+                if ((smoothed[i] / smoothed[i - 1u]) >
+                    (smoothed[sharp[sharp_count - 1u]] / smoothed[sharp[sharp_count - 1u] - 1u])) {
+                    sharp[sharp_count - 1u] = i;
+                }
+                continue;
+            }
+            sharp[sharp_count] = i;
+            sharp_fit[sharp_count] = i;
+            sharp_count++;
         }
-        sharp[sharp_count] = i;
-        sharp_fit[sharp_count] = i;
-        sharp_count++;
     }
 
     for (segment_index = 0u; segment_index <= sharp_count; segment_index++) {
