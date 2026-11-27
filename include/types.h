@@ -40,7 +40,8 @@ typedef struct lb_cfg_t {
     uint32_t batch_ms;
     uint32_t cool_ms;
     bool no_thp;
-    bool thp_set; /* true when --thp or --no-thp was given explicitly */
+    bool thp_set;     /* true when --thp or --no-thp was given explicitly */
+    uint32_t threads; /* 0 = auto, >= 1 = explicit */
     bool csv;
     bool no_color;
     bool write;                   /* --write: modify words during the memory-size walk */
