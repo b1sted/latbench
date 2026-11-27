@@ -94,6 +94,7 @@ static const lb_subtest_t BRANCH_SUBTESTS[] = {
 static const lb_subtest_t DRAM_SUBTESTS[] = {
     {"bw", "sequential read, write, and copy bandwidth", dram_bw_run},
     {"row", "DRAM row-buffer locality versus random page switches", dram_row_run},
+    {"lat", "pure DRAM latency (THP) versus 4 KiB page-walk penalty", dram_lat_run},
 };
 
 static const lb_subtest_t TOPO_SUBTESTS[] = {
@@ -822,10 +823,12 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
         }
         if (strcmp(arg, "--no-thp") == 0) {
             cfg->no_thp = true;
+            cfg->thp_set = true;
             continue;
         }
         if (strcmp(arg, "--thp") == 0) {
             cfg->no_thp = false;
+            cfg->thp_set = true;
             continue;
         }
         if (strcmp(arg, "--write") == 0) {
@@ -944,6 +947,7 @@ int main(int argc, char **argv)
     cfg.batch_ms = LB_DEFAULT_BATCH_MS;
     cfg.cool_ms = LB_DEFAULT_COOL_MS;
     cfg.no_thp = true;
+    cfg.thp_set = false;
     cfg.csv = false;
     cfg.no_color = false;
     cfg.write = false;

@@ -47,6 +47,26 @@
 #define DRAM_ROW_FAST_ACCESSES UINT64_C(262144)
 #define DRAM_ROW_FAST_REPEATS 2u
 
+/* dram lat: randomized pointer chase above L3, with and without huge pages. */
+#define DRAM_LAT_NODE_BYTES 64u
+#define DRAM_LAT_NODE_PAD (DRAM_LAT_NODE_BYTES - sizeof(void *))
+#define DRAM_LAT_MAX_BYTES (UINT64_C(256) * UINT64_C(1024) * UINT64_C(1024))
+#define DRAM_LAT_FAST_MAX_BYTES (UINT64_C(128) * UINT64_C(1024) * UINT64_C(1024))
+#define DRAM_LAT_MIN_NODES 1024u
+#define DRAM_LAT_ACCESSES UINT64_C(1048576)
+#define DRAM_LAT_FAST_ACCESSES UINT64_C(262144)
+#define DRAM_LAT_WARMUP UINT64_C(65536)
+#define DRAM_LAT_FAST_WARMUP UINT64_C(16384)
+#define DRAM_LAT_REPEATS 3u
+#define DRAM_LAT_FAST_REPEATS 2u
+#define DRAM_LAT_THP_MIN_BYTES ((size_t)2u * 1024u * 1024u)
+
+typedef struct dram_lat_node_t {
+    struct dram_lat_node_t *next;
+    /* Structural padding: fixes the node stride at one cache line. */
+    uint8_t pad[DRAM_LAT_NODE_PAD]; /* cppcheck-suppress unusedStructMember */
+} dram_lat_node_t;
+
 typedef struct dram_node_t {
     struct dram_node_t *next;
     /* Structural padding: fixes the node stride at 256 bytes. */
@@ -523,5 +543,204 @@ cleanup:
     free(row_order);
     free(order);
     pal_mem_free(arena);
+    return status;
+}
+
+/* --------------------------------------------------------------- dram lat */
+
+static PAL_NOINLINE uint64_t dram_lat_chase(const dram_lat_node_t *start, uint64_t accesses)
+{
+    const dram_lat_node_t *p = start;
+    uint64_t done = 0u;
+
+    while ((done + UINT64_C(8)) <= accesses) {
+        LB_UNROLL_8(p = p->next);
+        done += UINT64_C(8);
+    }
+    while (done < accesses) {
+        p = p->next;
+        done++;
+    }
+
+    PAL_BARRIER();
+    g_dram_sink = (uint64_t)(uintptr_t)p;
+    return g_dram_sink;
+}
+
+static double dram_lat_sample(const dram_lat_node_t *start, uint64_t accesses)
+{
+    const uint64_t begin = pal_now_ns();
+    const uint64_t sink = dram_lat_chase(start, accesses);
+    uint64_t end = pal_now_ns();
+
+    g_dram_sink = sink;
+    if (end <= begin || accesses == 0u) {
+        return 0.0;
+    }
+    return (double)(end - begin) / (double)accesses;
+}
+
+static lb_status_t dram_lat_measure(const pal_mem_t *arena, size_t *order, size_t node_count,
+                                    uint64_t accesses, uint64_t warmup, size_t repeats,
+                                    uint64_t seed, double *samples)
+{
+    dram_lat_node_t *nodes = pal_mem_data(arena);
+    size_t i = 0u;
+    size_t repeat = 0u;
+    lb_status_t status = LB_STATUS_OK;
+
+    if (nodes == NULL || order == NULL || samples == NULL || node_count == 0u) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    status = util_sattolo_indices(order, node_count, seed);
+    if (status != LB_STATUS_OK) {
+        return status;
+    }
+    for (i = 0u; i < node_count; i++) {
+        nodes[i].next = &nodes[order[i]];
+    }
+
+    (void)dram_lat_chase(&nodes[0], warmup);
+    for (repeat = 0u; repeat < repeats; repeat++) {
+        samples[repeat] = dram_lat_sample(&nodes[0], accesses);
+    }
+    return LB_STATUS_OK;
+}
+
+lb_status_t dram_lat_run(const lb_cfg_t *cfg)
+{
+    pal_mem_t *arena = NULL;
+    size_t *order = NULL;
+    double thp_samples[DRAM_LAT_REPEATS] = {0.0};
+    double no_thp_samples[DRAM_LAT_REPEATS] = {0.0};
+    const size_t page_size = pal_page_size();
+    size_t arena_bytes = 0u;
+    size_t node_count = 0u;
+    uint64_t accesses = 0u;
+    uint64_t warmup = 0u;
+    size_t repeats = 0u;
+    uint64_t baseline = 0u;
+    double thp_ns = 0.0;
+    double no_thp_ns = 0.0;
+    double delta_ns = 0.0;
+    double delta_pct = 0.0;
+    bool thp_ok = false;
+    lb_thp_mode_t thp_mode = LB_THP_UNSUPPORTED;
+    const char *thp_note = "unsupported";
+    lb_status_t status = LB_STATUS_NOMEM;
+
+    if (cfg == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+    accesses = cfg->fast ? DRAM_LAT_FAST_ACCESSES : DRAM_LAT_ACCESSES;
+    warmup = cfg->fast ? DRAM_LAT_FAST_WARMUP : DRAM_LAT_WARMUP;
+    repeats = cfg->fast ? DRAM_LAT_FAST_REPEATS : DRAM_LAT_REPEATS;
+    if (page_size == 0u) {
+        tty_err("cannot determine the system page size");
+        return LB_STATUS_UNSUPPORTED;
+    }
+
+    lb_bench_apply_runtime(cfg);
+
+    arena_bytes =
+        lb_bench_arena_cap(cfg, cfg->fast ? DRAM_LAT_FAST_MAX_BYTES : DRAM_LAT_MAX_BYTES, true);
+    arena_bytes = (arena_bytes / page_size) * page_size;
+    node_count = arena_bytes / DRAM_LAT_NODE_BYTES;
+    if (node_count < DRAM_LAT_MIN_NODES) {
+        tty_err("memory budget is too small for dram lat");
+        return LB_STATUS_NOMEM;
+    }
+    arena_bytes = node_count * DRAM_LAT_NODE_BYTES;
+
+    order = malloc(node_count * sizeof(*order));
+    if (order == NULL) {
+        return LB_STATUS_NOMEM;
+    }
+
+    {
+        char human[LB_NAME_MAX] = {0};
+
+        (void)tty_format_bytes((uint64_t)arena_bytes, human, sizeof(human));
+        tty_section(cfg, "DRAM latency");
+        tty_kv(cfg, "Arena", "%s", human);
+        tty_kv(cfg, "Nodes", "%zu", node_count);
+        tty_kv(cfg, "Accesses / repeats", "%" PRIu64 " / %zu", accesses, repeats);
+    }
+
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
+
+    /* Pass 1: THP arena, a clean DRAM latency without page walks. */
+    thp_mode = pal_thp_mode();
+    if (thp_mode == LB_THP_UNSUPPORTED || thp_mode == LB_THP_NEVER) {
+        thp_note = (thp_mode == LB_THP_NEVER) ? "unsupported (sysfs: never)" : "unsupported";
+    } else if (arena_bytes < DRAM_LAT_THP_MIN_BYTES) {
+        thp_note = "unsupported (arena < 2 MiB)";
+    } else {
+        arena = pal_mem_alloc(arena_bytes, PAL_MEM_THP);
+        if (arena == NULL) {
+            thp_note = "unsupported";
+        } else if (!pal_mem_is_thp(arena)) {
+            /* malloc fallback or a rejected madvise: do not fake a THP result. */
+            pal_mem_free(arena);
+            arena = NULL;
+            thp_note = "unsupported";
+        } else {
+            status = dram_lat_measure(arena, order, node_count, accesses, warmup, repeats,
+                                      UINT64_C(0x9e3779b97f4a7c15), thp_samples);
+            if (status != LB_STATUS_OK) {
+                goto cleanup;
+            }
+            thp_ns = stats_percentile(thp_samples, repeats, STATS_NOISE_PERCENTILE);
+            thp_ok = true;
+            /* Free before the second pass to avoid doubling peak RAM. */
+            pal_mem_free(arena);
+            arena = NULL;
+        }
+    }
+
+    /* Pass 2: 4 KiB pages, DRAM latency plus a TLB page-walk penalty. */
+    arena = pal_mem_alloc(arena_bytes, PAL_MEM_NO_THP);
+    if (arena == NULL) {
+        tty_err("cannot allocate a %zu-byte dram lat arena", arena_bytes);
+        goto cleanup;
+    }
+    status = dram_lat_measure(arena, order, node_count, accesses, warmup, repeats,
+                              UINT64_C(0xbb67ae8584caa73b), no_thp_samples);
+    if (status != LB_STATUS_OK) {
+        goto cleanup;
+    }
+    no_thp_ns = stats_percentile(no_thp_samples, repeats, STATS_NOISE_PERCENTILE);
+    pal_mem_free(arena);
+    arena = NULL;
+
+    tty_blank(cfg);
+    tty_header(cfg, "  %-16s %14s", "Mode", "ns/access");
+    tty_csv_row(cfg, "dram,lat,mode,ns_per_access");
+    if (thp_ok) {
+        tty_header(cfg, "  %-16s %14.2f", "THP", thp_ns);
+        tty_csv_row(cfg, "dram,lat,thp,%.2f", thp_ns);
+    } else {
+        tty_header(cfg, "  %-16s %14s", "THP", thp_note);
+        tty_csv_row(cfg, "dram,lat,thp,unsupported");
+    }
+    tty_header(cfg, "  %-16s %14.2f", "no-thp", no_thp_ns);
+    tty_csv_row(cfg, "dram,lat,no-thp,%.2f", no_thp_ns);
+    if (thp_ok) {
+        delta_ns = no_thp_ns - thp_ns;
+        delta_pct = (thp_ns > 0.0) ? ((delta_ns / thp_ns) * 100.0) : 0.0;
+        tty_header(cfg, "  %-16s %+14.2f (%+.1f%%)", "page walk delta", delta_ns, delta_pct);
+        tty_csv_row(cfg, "dram,lat,walk_delta,%.2f", delta_ns);
+    }
+
+    lb_passport_mutable()->ram_ns = thp_ok ? thp_ns : no_thp_ns;
+
+    tty_blank(cfg);
+    lb_bench_canary_finish(cfg, baseline, true);
+    status = LB_STATUS_OK;
+
+cleanup:
+    pal_mem_free(arena);
+    free(order);
     return status;
 }
