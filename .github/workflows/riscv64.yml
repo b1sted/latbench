@@ -24,7 +24,7 @@ permissions:
 
 concurrency:
   group: riscv64-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   riscv64:
@@ -34,24 +34,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Toolchain & host info
+      - name: Ensure toolchain
         run: |
           set -eu
           if ! command -v cc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends build-essential
           fi
-          mkdir -p build
-          {
-            uname -a
-            cc --version
-            lscpu || true
-            cat /sys/kernel/mm/transparent_hugepage/enabled || true
-            cat /proc/swaps || true
-          } > build/riscv64-env.txt
 
       - name: Build & strict tests
         run: make clean && make style-check && make dev && make test
+
+      - name: Collect host environment info
+        run: |
+          set -eu
+          mkdir -p build
+          {
+            echo "=== uname ==="
+            uname -a
+            echo "=== compiler ==="
+            cc --version
+            echo "=== lscpu ==="
+            lscpu || true
+            echo "=== THP ==="
+            cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo "thp: unavailable"
+            echo "=== /proc/swaps ==="
+            cat /proc/swaps 2>/dev/null || echo "swaps: unavailable"
+          } > build/riscv64-env.txt
 
       - name: Optional ASan/UBSan (make leaks)
         if: ${{ inputs.run_leaks }}
@@ -66,7 +75,7 @@ jobs:
             ./build/bin/latbench sys info --no-color
             ./build/bin/latbench sys timer --no-color
             ./build/bin/latbench auto --no-color
-          } > build/riscv64-auto.txt
+          } > build/riscv64-auto.txt 2>&1
           ./build/bin/latbench auto --csv > build/riscv64-passport.csv
 
       - name: Optional extra probes
@@ -79,7 +88,22 @@ jobs:
             ./build/bin/latbench dram bw --no-color
             ./build/bin/latbench topo pingpong --no-color
             ./build/bin/latbench os swap --no-color
-          } > build/riscv64-extra.txt
+          } > build/riscv64-extra.txt 2>&1
+
+      - name: Write job summary
+        if: always()
+        run: |
+          set -eu
+          for f in build/riscv64-env.txt build/riscv64-auto.txt build/riscv64-extra.txt; do
+            if [ -f "$f" ]; then
+              {
+                echo "### $f"
+                echo '```text'
+                cat "$f"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
 
       - name: Upload artifacts
         if: always()
