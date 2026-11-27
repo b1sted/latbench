@@ -172,7 +172,9 @@ leaks: $(LEAKS_BIN) $(LEAKS_TEST_BINS)
 
 lint: style-check format-check
 	@if command -v $(CLANG_TIDY) >/dev/null 2>&1; then \
-		$(CLANG_TIDY) $(SRCS) -- $(CPPFLAGS) $(RELEASE_CFLAGS) -Iinclude; \
+		for src in $(SRCS); do \
+			$(CLANG_TIDY) "$$src" -- $(CPPFLAGS) $(RELEASE_CFLAGS) -Iinclude || exit 1; \
+		done; \
 	elif [ "$${CI:-}" = "true" ]; then \
 		echo "error: $(CLANG_TIDY) is required in CI" >&2; \
 		exit 1; \
