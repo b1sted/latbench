@@ -40,7 +40,7 @@
 #define DRAM_ROW_NODES_PER_ROW 16u
 #define DRAM_ROW_NODE_BYTES (DRAM_ROW_BYTES / DRAM_ROW_NODES_PER_ROW)
 #define DRAM_ROW_NODE_PAD (DRAM_ROW_NODE_BYTES - sizeof(void *))
-#define DRAM_ROW_MAX_BYTES (UINT64_C(64) * UINT64_C(1024) * UINT64_C(1024))
+#define DRAM_ROW_MAX_BYTES (UINT64_C(128) * UINT64_C(1024) * UINT64_C(1024))
 #define DRAM_ROW_MIN_ROWS 2u
 #define DRAM_ROW_ACCESSES UINT64_C(1048576)
 #define DRAM_ROW_WARMUP UINT64_C(65536)
@@ -719,6 +719,9 @@ lb_status_t dram_row_run(const lb_cfg_t *cfg)
     }
     node_count = row_count * (size_t)DRAM_ROW_NODES_PER_ROW;
     arena_bytes = row_count * DRAM_ROW_BYTES;
+    if (accesses < (uint64_t)node_count) {
+        accesses = (uint64_t)node_count;
+    }
 
     arena = pal_mem_alloc(arena_bytes, lb_bench_arena_flags(cfg));
     if (arena == NULL) {
@@ -851,6 +854,8 @@ static lb_status_t dram_lat_measure(const pal_mem_t *arena, size_t *order, size_
     dram_lat_node_t *nodes = pal_mem_data(arena);
     size_t i = 0u;
     size_t repeat = 0u;
+    size_t cursor = 0u;
+    size_t warmup_step = 0u;
     lb_status_t status = LB_STATUS_OK;
 
     if (nodes == NULL || order == NULL || samples == NULL || node_count == 0u) {
@@ -865,9 +870,18 @@ static lb_status_t dram_lat_measure(const pal_mem_t *arena, size_t *order, size_
         nodes[i].next = &nodes[order[i]];
     }
 
-    (void)dram_lat_chase(&nodes[0], warmup);
+    /*
+     * Start every timed pass at a different node so the warm-up cannot leave
+     * the first repeat biased by a partially resident tail of the arena.
+     */
+    warmup_step = (size_t)(warmup % (uint64_t)node_count);
+    if (warmup_step == 0u) {
+        warmup_step = 1u;
+    }
+    (void)dram_lat_chase(&nodes[cursor], warmup);
     for (repeat = 0u; repeat < repeats; repeat++) {
-        samples[repeat] = dram_lat_sample(&nodes[0], accesses);
+        cursor = (cursor + warmup_step) % node_count;
+        samples[repeat] = dram_lat_sample(&nodes[cursor], accesses);
     }
     return LB_STATUS_OK;
 }
@@ -916,6 +930,8 @@ lb_status_t dram_lat_run(const lb_cfg_t *cfg)
         return LB_STATUS_NOMEM;
     }
     arena_bytes = node_count * DRAM_LAT_NODE_BYTES;
+    const uint64_t effective_accesses =
+        (accesses < (uint64_t)node_count) ? (uint64_t)node_count : accesses;
 
     order = malloc(node_count * sizeof(*order));
     if (order == NULL) {
@@ -929,7 +945,7 @@ lb_status_t dram_lat_run(const lb_cfg_t *cfg)
         tty_section(cfg, "DRAM latency");
         tty_kv(cfg, "Arena", "%s", human);
         tty_kv(cfg, "Nodes", "%zu", node_count);
-        tty_kv(cfg, "Accesses / repeats", "%" PRIu64 " / %zu", accesses, repeats);
+        tty_kv(cfg, "Accesses / repeats", "%" PRIu64 " / %zu", effective_accesses, repeats);
     }
 
     baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
@@ -950,7 +966,7 @@ lb_status_t dram_lat_run(const lb_cfg_t *cfg)
             arena = NULL;
             thp_note = "unsupported";
         } else {
-            status = dram_lat_measure(arena, order, node_count, accesses, warmup, repeats,
+            status = dram_lat_measure(arena, order, node_count, effective_accesses, warmup, repeats,
                                       UINT64_C(0x9e3779b97f4a7c15), thp_samples);
             if (status != LB_STATUS_OK) {
                 goto cleanup;
@@ -969,7 +985,7 @@ lb_status_t dram_lat_run(const lb_cfg_t *cfg)
         tty_err("cannot allocate a %zu-byte dram lat arena", arena_bytes);
         goto cleanup;
     }
-    status = dram_lat_measure(arena, order, node_count, accesses, warmup, repeats,
+    status = dram_lat_measure(arena, order, node_count, effective_accesses, warmup, repeats,
                               UINT64_C(0xbb67ae8584caa73b), no_thp_samples);
     if (status != LB_STATUS_OK) {
         goto cleanup;
