@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "bench_common.h"
 #include "pal/compiler.h"
@@ -39,6 +40,10 @@
 #define OS_SLEEP_SAMPLES 500u
 #define OS_SLEEP_TARGET_SHORT_US 1u
 #define OS_SLEEP_TARGET_LONG_US 100u
+
+/* os swap: cap the paged-out working set to keep the probe bounded. */
+#define OS_SWAP_MAX_PAGES 1024u
+#define OS_SWAP_MIN_PAGES 64u
 
 /* Compact auto mode: shorter batches keep the passport run inside its budget. */
 #define OS_FAST_SYSCALL_CALLS 10000u
@@ -422,4 +427,94 @@ lb_status_t os_sleep_run(const lb_cfg_t *cfg)
     tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, false);
     return LB_STATUS_OK;
+}
+
+/* ----------------------------------------------------------------- os swap */
+
+lb_status_t os_swap_run(const lb_cfg_t *cfg)
+{
+    uint64_t *raw = NULL;
+    double *values = NULL;
+    pal_os_swap_result_t result = {0};
+    size_t count = 0u;
+    size_t i = 0u;
+    uint64_t baseline = 0u;
+    double p10_us = 0.0;
+    double p50_us = 0.0;
+    double p90_us = 0.0;
+    double p99_us = 0.0;
+    lb_status_t status = LB_STATUS_NOMEM;
+
+    if (cfg == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    raw = malloc((size_t)OS_SWAP_MAX_PAGES * sizeof(*raw));
+    values = malloc((size_t)OS_SWAP_MAX_PAGES * sizeof(*values));
+    if (raw == NULL || values == NULL) {
+        tty_err("os swap: cannot allocate sample buffers");
+        goto cleanup;
+    }
+
+    lb_bench_apply_runtime(cfg);
+    baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
+
+    status = pal_os_swap_probe(OS_SWAP_MAX_PAGES, raw, (size_t)OS_SWAP_MAX_PAGES, &count, &result);
+    if (status == LB_STATUS_UNSUPPORTED) {
+        tty_header(cfg, "os swap: skipped (no active swap or MADV_PAGEOUT unsupported)");
+        tty_csv_row(cfg, "os,swap,metric,value,unit");
+        tty_csv_row(cfg, "os,swap,status,skipped,text");
+        status = LB_STATUS_OK;
+        goto cleanup;
+    }
+    if (status != LB_STATUS_OK || count == 0u) {
+        tty_err("os swap: probe failed (status %d)", (int)status);
+        if (status == LB_STATUS_OK) {
+            status = LB_STATUS_ERROR;
+        }
+        goto cleanup;
+    }
+
+    if (count < (size_t)OS_SWAP_MIN_PAGES) {
+        tty_warn("os swap: limited to %zu pages due to small swap/RAM budget", count);
+    }
+    if (result.major_faults == 0u) {
+        tty_warn("os swap: 0 major faults recorded; pages may have remained in RAM");
+    }
+
+    for (i = 0u; i < count; i++) {
+        values[i] = (double)raw[i];
+    }
+    p10_us = stats_percentile(values, count, 10.0) / OS_NS_PER_US;
+    p50_us = stats_percentile(values, count, 50.0) / OS_NS_PER_US;
+    p90_us = stats_percentile(values, count, 90.0) / OS_NS_PER_US;
+    p99_us = stats_percentile(values, count, 99.0) / OS_NS_PER_US;
+
+    tty_section(cfg, "OS swap");
+    tty_kv(cfg, "Pages", "%zu", count);
+    tty_kv(cfg, "Swap free", "%" PRIu64 " KiB", result.swap_free_kib);
+    tty_kv(cfg, "Major / minor faults", "%" PRIu64 " / %" PRIu64, result.major_faults,
+           result.minor_faults);
+    tty_blank(cfg);
+    tty_header(cfg, "  %-10s %14s", "Percentile", "us");
+    tty_header(cfg, "  %-10s %14.3f", "p10", p10_us);
+    tty_header(cfg, "  %-10s %14.3f", "p50", p50_us);
+    tty_header(cfg, "  %-10s %14.3f", "p90", p90_us);
+    tty_header(cfg, "  %-10s %14.3f", "p99", p99_us);
+    tty_csv_row(cfg, "os,swap,metric,value,unit");
+    tty_csv_row(cfg, "os,swap,p10_us,%.3f,us", p10_us);
+    tty_csv_row(cfg, "os,swap,p50_us,%.3f,us", p50_us);
+    tty_csv_row(cfg, "os,swap,p90_us,%.3f,us", p90_us);
+    tty_csv_row(cfg, "os,swap,p99_us,%.3f,us", p99_us);
+    tty_csv_row(cfg, "os,swap,major_faults,%" PRIu64 ",count", result.major_faults);
+    tty_csv_row(cfg, "os,swap,minor_faults,%" PRIu64 ",count", result.minor_faults);
+
+    tty_blank(cfg);
+    lb_bench_canary_finish(cfg, baseline, false);
+    status = LB_STATUS_OK;
+
+cleanup:
+    free(values);
+    free(raw);
+    return status;
 }

@@ -43,6 +43,12 @@ bool pal_is_tty(bool use_stderr);
 /* System page size in bytes. */
 size_t pal_page_size(void);
 
+/*
+ * Transparent huge page policy configured for the system. Platforms without
+ * transparent huge pages report LB_THP_UNSUPPORTED.
+ */
+lb_thp_mode_t pal_thp_mode(void);
+
 /* Total physical RAM in bytes, or 0 when the platform cannot report it. */
 uint64_t pal_total_ram_bytes(void);
 
@@ -55,6 +61,14 @@ uint64_t pal_safe_max_mem_bytes(uint64_t user_limit_mb);
 
 /* Number of online CPUs, always at least 1. */
 uint32_t pal_cpu_count(void);
+
+/*
+ * Fill cpus[0 .. *out_count - 1] with the available logical CPU IDs in
+ * ascending order, up to capacity entries. Returns LB_STATUS_INVALID_ARG when
+ * cpus is NULL, capacity is zero, or out_count is NULL; *out_count is zeroed
+ * whenever out_count is not NULL. On success at least one CPU is reported.
+ */
+lb_status_t pal_cpu_list(int32_t *cpus, size_t capacity, size_t *out_count);
 
 /*
  * Name of the architecture targeted by this binary ("x86_64", "i386", "arm64",
@@ -119,6 +133,12 @@ void *pal_mem_data(const pal_mem_t *mem);
 
 /* Return the requested arena size in bytes, or 0 when mem is NULL. */
 size_t pal_mem_size(const pal_mem_t *mem);
+
+/*
+ * True when the arena is backed by transparent huge pages. Always false when
+ * mem is NULL or the platform has no transparent huge page support.
+ */
+bool pal_mem_is_thp(const pal_mem_t *mem);
 
 /* Release an arena. Safe to call with NULL. */
 void pal_mem_free(pal_mem_t *mem);

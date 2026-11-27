@@ -1,0 +1,155 @@
+name: RISC-V 64 Live Calibration
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_auto:
+        description: 'Run latbench auto calibration (human + CSV)'
+        required: false
+        type: boolean
+        default: true
+      run_extra:
+        description: 'Run standalone v0.2 probes (mem, core, branch, dram, topo, os swap)'
+        required: false
+        type: boolean
+        default: false
+      run_leaks:
+        description: 'Run ASan/UBSan test suite (make leaks)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: riscv64-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  riscv64:
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Ensure toolchain
+        run: |
+          set -eu
+          if ! command -v cc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends build-essential
+          fi
+
+      - name: Build & strict tests
+        run: make clean && make style-check && make dev && make test
+
+      - name: Collect host environment info
+        run: |
+          set -eu
+          mkdir -p build
+          {
+            echo "=== uname ==="
+            uname -a
+            echo "=== compiler ==="
+            cc --version
+            echo "=== lscpu ==="
+            lscpu || true
+            echo "=== THP ==="
+            cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo "thp: unavailable"
+            echo "=== /proc/swaps ==="
+            cat /proc/swaps 2>/dev/null || echo "swaps: unavailable"
+          } > build/riscv64-env.txt
+
+      - name: Optional ASan/UBSan (make leaks)
+        if: ${{ inputs.run_leaks }}
+        run: make leaks
+
+      - name: Optional live auto calibration
+        if: ${{ inputs.run_auto }}
+        run: |
+          set -eu
+          {
+            ./build/bin/latbench -V
+            ./build/bin/latbench sys info --no-color
+            ./build/bin/latbench sys timer --no-color
+            ./build/bin/latbench auto --no-color
+          } > build/riscv64-auto.txt 2>&1
+          ./build/bin/latbench auto --csv > build/riscv64-passport.csv
+
+      - name: Optional standalone v0.2 probes
+        if: ${{ inputs.run_extra }}
+        run: |
+          set -eu
+          OUT="build/riscv64-extra.txt"
+          : > "$OUT"
+          for probe in \
+            "mem size" \
+            "mem line" \
+            "core stlf" \
+            "branch rsb" \
+            "branch btb" \
+            "dram lat" \
+            "dram bw" \
+            "dram bw --threads 2" \
+            "dram row" \
+            "topo falseshare" \
+            "topo pingpong --mode flag" \
+            "topo pingpong --mode cas" \
+            "os swap"; do
+            echo "=== latbench $probe ===" >> "$OUT"
+            # shellcheck disable=SC2086
+            ./build/bin/latbench $probe --no-color >> "$OUT" 2>&1
+          done
+          if command -v taskset >/dev/null 2>&1; then
+            echo "=== sparse cpuset (0,2): topo pingpong ===" >> "$OUT"
+            taskset -c 0,2 ./build/bin/latbench topo pingpong --no-color >> "$OUT" 2>&1
+          fi
+
+      - name: Write job summary
+        if: always()
+        run: |
+          set -eu
+          for f in build/riscv64-env.txt build/riscv64-auto.txt; do
+            if [ -f "$f" ]; then
+              {
+                echo "### $f"
+                echo '```text'
+                cat "$f"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          if [ -s build/riscv64-extra.txt ]; then
+            {
+              echo "<details><summary>Standalone v0.2 probes (riscv64-extra.txt)</summary>"
+              echo ""
+              echo '```text'
+              cat build/riscv64-extra.txt
+              echo '```'
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -s build/riscv64-passport.csv ]; then
+            {
+              echo "<details><summary>Passport CSV</summary>"
+              echo ""
+              echo '```csv'
+              cat build/riscv64-passport.csv
+              echo '```'
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: riscv64-calibration-${{ github.run_number }}
+          if-no-files-found: ignore
+          path: |
+            build/riscv64-env.txt
+            build/riscv64-auto.txt
+            build/riscv64-passport.csv
+            build/riscv64-extra.txt

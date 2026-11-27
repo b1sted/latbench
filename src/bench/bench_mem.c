@@ -85,6 +85,12 @@ static const size_t MEM_SIZE_GRID_KIB[] = {
 #define MEM_LINE_ACCESSES 524288u
 #define MEM_LINE_REPEATS 5u
 
+/* Cache-line jump detection thresholds, tuned for x86 adjacent-line prefetch. */
+#define MEM_LINE_DETECT_MIN_STRIDE 32u
+#define MEM_LINE_JUMP_RATIO 1.20
+#define MEM_LINE_JUMP_MIN_NS 1.0
+#define MEM_LINE_SUSTAIN_RATIO 1.15
+
 /* mem assoc: N lines spaced stride bytes apart, repeated over one cycle. */
 #define MEM_ASSOC_MAX_NODES 32u
 #define MEM_ASSOC_MAX_BYTES (UINT64_C(128) * UINT64_C(1024) * UINT64_C(1024))
@@ -178,12 +184,22 @@ static void mem_publish_cache_steps(const stats_steps_t *steps)
     }
     if (steps->count > 0u) {
         passport->l1d_bytes = (uint64_t)steps->items[0].x;
+        passport->l1d_ns = steps->items[0].lower_ns;
     }
     if (steps->count > 1u) {
         passport->l2_bytes = (uint64_t)steps->items[1].x;
+        passport->l2_ns = steps->items[1].lower_ns;
     }
     if (steps->count > 2u) {
         passport->l3_bytes = (uint64_t)steps->items[2].x;
+        passport->l3_ns = steps->items[2].lower_ns;
+    }
+    /*
+     * Fallback only: dram lat overwrites ram_ns with an exact DRAM figure when
+     * it runs later in the auto profile.
+     */
+    if (passport->ram_ns == 0.0 && steps->count > 0u) {
+        passport->ram_ns = steps->items[steps->count - 1u].upper_ns;
     }
 }
 
@@ -574,6 +590,75 @@ static PAL_NOINLINE uint64_t mem_line_chase(const uint8_t *start, size_t hops)
     return g_mem_sink;
 }
 
+/*
+ * The first stride whose dependent pair crosses the cache-line boundary makes
+ * the second load miss the line touched by the first. Adjacent-line prefetchers
+ * soften that step on x86, so the detector asks for a moderate jump that holds
+ * on the following stride instead of a sharp single-point spike.
+ */
+static size_t mem_line_estimate(const stats_series_t *series)
+{
+    stats_point_summary_t summaries[LB_ARRAY_SIZE(MEM_LINE_STEPS)] = {{0}};
+    size_t count = stats_series_count(series);
+    double base = 0.0;
+    size_t index = 0u;
+
+    if (count > LB_ARRAY_SIZE(MEM_LINE_STEPS)) {
+        count = LB_ARRAY_SIZE(MEM_LINE_STEPS);
+    }
+    if (count == 0u) {
+        return 0u;
+    }
+
+    for (index = 0u; index < count; index++) {
+        if (stats_series_summary(series, index, &summaries[index]) != LB_STATUS_OK) {
+            return 0u;
+        }
+    }
+
+    /*
+     * Use the lowest of the sub-line offsets as the baseline so a single noisy
+     * 8-byte sample cannot inflate the threshold and fake a wider line.
+     */
+    for (index = 0u; index < count && index < 3u; index++) {
+        const double p10 = summaries[index].p10_ns;
+
+        if (MEM_LINE_STEPS[index] < 64u && p10 > 0.0 && (base <= 0.0 || p10 < base)) {
+            base = p10;
+        }
+    }
+    if (!(base > 0.0)) {
+        return 0u;
+    }
+
+    for (index = 1u; index < count; index++) {
+        const double p10 = summaries[index].p10_ns;
+
+        if (MEM_LINE_STEPS[index] < (size_t)MEM_LINE_DETECT_MIN_STRIDE) {
+            continue;
+        }
+        /*
+         * Real cache lines top out at 128 B. The 256 B step only confirms that
+         * a plateau holds and must never be reported as the line size.
+         */
+        if (MEM_LINE_STEPS[index] > 128u) {
+            continue;
+        }
+        if (!(p10 >= (base * MEM_LINE_JUMP_RATIO))) {
+            continue;
+        }
+        if ((p10 - base) < MEM_LINE_JUMP_MIN_NS) {
+            continue;
+        }
+        if ((index + 1u) < count &&
+            !(summaries[index + 1u].p10_ns >= (base * MEM_LINE_SUSTAIN_RATIO))) {
+            continue;
+        }
+        return MEM_LINE_STEPS[index];
+    }
+    return 0u;
+}
+
 lb_status_t mem_line_run(const lb_cfg_t *cfg)
 {
     pal_mem_t *arena = NULL;
@@ -584,6 +669,7 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
     size_t buffer_bytes = 0u;
     size_t block_count = 0u;
     size_t step_index = 0u;
+    size_t line_bytes = 0u;
     uint64_t baseline = 0u;
     lb_status_t status = LB_STATUS_NOMEM;
 
@@ -673,6 +759,13 @@ lb_status_t mem_line_run(const lb_cfg_t *cfg)
     status = tty_plot_series_ex(cfg, series, NULL, NULL, 0u, 0u, false);
     if (status != LB_STATUS_OK) {
         goto cleanup;
+    }
+    line_bytes = mem_line_estimate(series);
+    tty_blank(cfg);
+    if (line_bytes > 0u) {
+        tty_kv(cfg, "Cache line", "~%zu B (stride jump threshold)", line_bytes);
+    } else {
+        tty_kv(cfg, "Cache line", "not detected (no clear jump)");
     }
     tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, true);

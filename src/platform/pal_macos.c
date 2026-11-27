@@ -79,6 +79,34 @@ uint32_t pal_cpu_count(void)
     return (uint32_t)count;
 }
 
+lb_status_t pal_cpu_list(int32_t *cpus, size_t capacity, size_t *out_count)
+{
+    size_t count = 0u;
+    size_t i = 0u;
+
+    if (out_count != NULL) {
+        *out_count = 0u;
+    }
+    if (cpus == NULL || capacity == 0u || out_count == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    count = (size_t)pal_cpu_count();
+    if (count > capacity) {
+        count = capacity;
+    }
+    for (i = 0u; i < count; i++) {
+        cpus[i] = (int32_t)i;
+    }
+    *out_count = count;
+    return LB_STATUS_OK;
+}
+
+lb_thp_mode_t pal_thp_mode(void)
+{
+    return LB_THP_UNSUPPORTED;
+}
+
 lb_status_t pal_pin_cpu(int32_t cpu_id)
 {
     /* macOS does not expose a stable per-thread hard affinity API. */
@@ -145,6 +173,7 @@ pal_mem_t *pal_mem_alloc(size_t size, uint32_t flags)
     mem->base = base;
     mem->mapped_size = mapped_size;
     mem->size = size;
+    mem->thp_active = false;
     return mem;
 
 cleanup:

@@ -16,6 +16,14 @@ typedef enum lb_status_t {
     LB_STATUS_UNSUPPORTED = 5
 } lb_status_t;
 
+/* Transparent huge page policy reported by the kernel. */
+typedef enum lb_thp_mode_t {
+    LB_THP_UNSUPPORTED = 0,
+    LB_THP_ALWAYS = 1,
+    LB_THP_MADVISE = 2,
+    LB_THP_NEVER = 3
+} lb_thp_mode_t;
+
 /* Context-switch probe selection for "os ctx". */
 typedef enum lb_os_ctx_mode_t {
     LB_OS_CTX_BOTH = 0,
@@ -32,6 +40,8 @@ typedef struct lb_cfg_t {
     uint32_t batch_ms;
     uint32_t cool_ms;
     bool no_thp;
+    bool thp_set;     /* true when --thp or --no-thp was given explicitly */
+    uint32_t threads; /* 0 = auto, >= 1 = explicit */
     bool csv;
     bool no_color;
     bool write;                   /* --write: modify words during the memory-size walk */
@@ -58,9 +68,13 @@ typedef struct lb_passport_t {
     uint32_t cpu_count;
 
     uint64_t l1d_bytes;
+    double l1d_ns;
     uint32_t l1d_ways;
     uint64_t l2_bytes;
+    double l2_ns;
     uint64_t l3_bytes;
+    double l3_ns;
+    double ram_ns;
     uint32_t coherence_line_bytes;
     uint32_t l1dtlb_entries;
 

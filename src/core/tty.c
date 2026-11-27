@@ -107,22 +107,6 @@ static bool tty_color_enabled(const lb_cfg_t *cfg, const FILE *stream)
     return pal_is_tty(stream == stderr);
 }
 
-static void tty_vline(FILE *stream, const char *prefix, const char *fmt, va_list args)
-    PAL_PRINTF_FORMAT(3, 0);
-
-static void tty_vline(FILE *stream, const char *prefix, const char *fmt, va_list args)
-{
-    if (fmt == NULL) {
-        return;
-    }
-
-    if (prefix != NULL) {
-        (void)fputs(prefix, stream);
-    }
-    (void)vfprintf(stream, fmt, args);
-    (void)fputc('\n', stream);
-}
-
 void tty_set_no_color(bool no_color)
 {
     g_tty_no_color = no_color;
@@ -145,7 +129,8 @@ void tty_header(const lb_cfg_t *cfg, const char *fmt, ...)
 
     stream = tty_info_stream(cfg);
     va_start(args, fmt);
-    tty_vline(stream, NULL, fmt, args);
+    (void)vfprintf(stream, fmt, args);
+    (void)fputc('\n', stream);
     va_end(args);
 }
 
@@ -198,7 +183,8 @@ void tty_kv(const lb_cfg_t *cfg, const char *key, const char *fmt, ...)
     (void)fprintf(stream, "  %-*s ", TTY_KEY_WIDTH, key);
 
     va_start(args, fmt);
-    tty_vline(stream, NULL, fmt, args);
+    (void)vfprintf(stream, fmt, args);
+    (void)fputc('\n', stream);
     va_end(args);
 }
 
@@ -216,7 +202,8 @@ void tty_csv_row(const lb_cfg_t *cfg, const char *fmt, ...)
     }
 
     va_start(args, fmt);
-    tty_vline(stdout, NULL, fmt, args);
+    (void)vfprintf(stdout, fmt, args);
+    (void)fputc('\n', stdout);
     va_end(args);
 }
 
@@ -231,18 +218,16 @@ void tty_progress(const lb_cfg_t *cfg, const char *fmt, ...)
 
     stream = tty_info_stream(cfg);
     va_start(args, fmt);
-    tty_vline(stream, NULL, fmt, args);
+    (void)vfprintf(stream, fmt, args);
+    (void)fputc('\n', stream);
     va_end(args);
 }
 
-static void tty_status(const char *color, const char *prefix, const char *fmt, va_list args)
-    PAL_PRINTF_FORMAT(3, 0);
-
-static void tty_status(const char *color, const char *prefix, const char *fmt, va_list args)
+static void tty_status_prefix(const char *color, const char *prefix)
 {
     bool use_color = false;
 
-    if (fmt == NULL) {
+    if (prefix == NULL) {
         return;
     }
 
@@ -254,7 +239,6 @@ static void tty_status(const char *color, const char *prefix, const char *fmt, v
     if (use_color) {
         (void)fputs(TTY_ANSI_RESET, stderr);
     }
-    tty_vline(stderr, NULL, fmt, args);
 }
 
 void tty_warn(const char *fmt, ...)
@@ -265,8 +249,10 @@ void tty_warn(const char *fmt, ...)
         return;
     }
 
+    tty_status_prefix(TTY_ANSI_WARN, "[WARN] ");
     va_start(args, fmt);
-    tty_status(TTY_ANSI_WARN, "[WARN] ", fmt, args);
+    (void)vfprintf(stderr, fmt, args);
+    (void)fputc('\n', stderr);
     va_end(args);
 }
 
@@ -278,8 +264,10 @@ void tty_err(const char *fmt, ...)
         return;
     }
 
+    tty_status_prefix(TTY_ANSI_ERROR, "[ERROR] ");
     va_start(args, fmt);
-    tty_status(TTY_ANSI_ERROR, "[ERROR] ", fmt, args);
+    (void)vfprintf(stderr, fmt, args);
+    (void)fputc('\n', stderr);
     va_end(args);
 }
 
@@ -552,7 +540,11 @@ static void tty_csv_field(const char *text, char *out, size_t capacity)
     while (text[i] != '\0' && (i + 1u) < capacity) {
         const char c = text[i];
 
-        out[i] = (c == ',' || c == '\n' || c == '\r') ? '_' : c;
+        if (c == ',' || c == '\n' || c == '\r') {
+            out[i] = '_';
+        } else {
+            out[i] = c;
+        }
         i++;
     }
     out[i] = '\0';
@@ -706,8 +698,10 @@ lb_status_t tty_plot_series_ex(const lb_cfg_t *cfg, const stats_series_t *series
         }
     }
 
-    tty_blank(cfg);
-    tty_print_thresholds(cfg, steps, level_names, level_name_count, page_size);
+    if (steps != NULL) {
+        tty_blank(cfg);
+        tty_print_thresholds(cfg, steps, level_names, level_name_count, page_size);
+    }
     status = LB_STATUS_OK;
 
 cleanup:
@@ -722,12 +716,67 @@ lb_status_t tty_plot_series(const lb_cfg_t *cfg, const stats_series_t *series,
     return tty_plot_series_ex(cfg, series, steps, level_names, level_name_count, page_size, true);
 }
 
-static const char *tty_matrix_cell_color(uint64_t ns)
+static uint64_t tty_matrix_min_offdiagonal(const uint64_t *latency_ns, size_t count)
 {
-    if (ns <= TTY_MATRIX_FAST_NS) {
+    uint64_t min_ns = 0u;
+    size_t i;
+    size_t j;
+
+    for (i = 0u; i < count; i++) {
+        for (j = 0u; j < count; j++) {
+            const uint64_t value = latency_ns[i * count + j];
+
+            if (i == j || value == 0u) {
+                continue;
+            }
+            if (min_ns == 0u || value < min_ns) {
+                min_ns = value;
+            }
+        }
+    }
+    return min_ns;
+}
+
+/*
+ * Keep the fixed 30 ns / 80 ns heatmap boundaries on fast machines, but scale
+ * them with the fastest real cross-CPU latency on slower SoCs. Without the
+ * floor an entire riscv64 or embedded matrix would render as the "slow" colour.
+ */
+static void tty_matrix_thresholds(const uint64_t *latency_ns, size_t count, uint64_t *fast_out,
+                                  uint64_t *slow_out)
+{
+    uint64_t fast_ns = TTY_MATRIX_FAST_NS;
+    uint64_t slow_ns = TTY_MATRIX_SLOW_NS;
+    const uint64_t min_ns = tty_matrix_min_offdiagonal(latency_ns, count);
+
+    if (min_ns > 0u) {
+        const uint64_t scaled_fast =
+            (min_ns <= (UINT64_MAX - (min_ns / 2u))) ? (min_ns + (min_ns / 2u)) : UINT64_MAX;
+        const uint64_t scaled_slow =
+            (min_ns <= (UINT64_MAX / UINT64_C(3))) ? (min_ns * UINT64_C(3)) : UINT64_MAX;
+
+        if (scaled_fast > fast_ns) {
+            fast_ns = scaled_fast;
+        }
+        if (scaled_slow > slow_ns) {
+            slow_ns = scaled_slow;
+        }
+        if (slow_ns <= fast_ns) {
+            slow_ns =
+                (fast_ns <= (UINT64_MAX - UINT64_C(20))) ? (fast_ns + UINT64_C(20)) : UINT64_MAX;
+        }
+    }
+
+    *fast_out = fast_ns;
+    *slow_out = slow_ns;
+}
+
+static const char *tty_matrix_cell_color(uint64_t ns, uint64_t fast_ns, uint64_t slow_ns)
+{
+    if (ns <= fast_ns) {
         return TTY_ANSI_MATRIX_FAST;
     }
-    if (ns <= TTY_MATRIX_SLOW_NS) {
+    if (ns <= slow_ns) {
         return TTY_ANSI_MATRIX_MID;
     }
     return TTY_ANSI_MATRIX_SLOW;
@@ -758,21 +807,31 @@ static void tty_matrix_format_latency(uint64_t ns, char *out, size_t capacity)
     }
 }
 
-lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint64_t *latency_ns,
-                             size_t count)
+lb_status_t tty_print_matrix_cpus(const lb_cfg_t *cfg, const char *title, const int32_t *cpu_ids,
+                                  const uint64_t *latency_ns, size_t count)
 {
     FILE *stream = NULL;
     bool color = false;
+    uint64_t fast_ns = TTY_MATRIX_FAST_NS;
+    uint64_t slow_ns = TTY_MATRIX_SLOW_NS;
     size_t i = 0u;
     size_t j = 0u;
 
     if (latency_ns == NULL || count == 0u || count > (size_t)TTY_MATRIX_MAX_SIZE) {
         return LB_STATUS_INVALID_ARG;
     }
+    if (cpu_ids != NULL) {
+        for (i = 0u; i < count; i++) {
+            if (cpu_ids[i] < 0) {
+                return LB_STATUS_INVALID_ARG;
+            }
+        }
+    }
     if (tty_plot_suppressed(cfg)) {
         return LB_STATUS_OK;
     }
 
+    tty_matrix_thresholds(latency_ns, count, &fast_ns, &slow_ns);
     tty_section(cfg, (title != NULL) ? title : "CPU latency matrix");
 
     if (cfg != NULL && cfg->csv) {
@@ -781,9 +840,14 @@ lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint6
             g_tty_csv_matrix_header = true;
         }
         for (i = 0u; i < count; i++) {
+            const int32_t row_cpu = (cpu_ids != NULL) ? cpu_ids[i] : (int32_t)i;
+
             for (j = 0u; j < count; j++) {
+                const int32_t col_cpu = (cpu_ids != NULL) ? cpu_ids[j] : (int32_t)j;
+
                 if (i != j) {
-                    tty_csv_row(cfg, "%zu,%zu,%" PRIu64, i, j, latency_ns[i * count + j]);
+                    tty_csv_row(cfg, "%" PRId32 ",%" PRId32 ",%" PRIu64, row_cpu, col_cpu,
+                                latency_ns[i * count + j]);
                 }
             }
         }
@@ -795,7 +859,9 @@ lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint6
 
     (void)fprintf(stream, "    |");
     for (j = 0u; j < count; j++) {
-        (void)fprintf(stream, "%*zu ", TTY_MATRIX_CELL_WIDTH, j);
+        const int32_t col_cpu = (cpu_ids != NULL) ? cpu_ids[j] : (int32_t)j;
+
+        (void)fprintf(stream, "%*" PRId32 " ", TTY_MATRIX_CELL_WIDTH, col_cpu);
     }
     (void)fputc('\n', stream);
 
@@ -806,7 +872,9 @@ lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint6
     (void)fputc('\n', stream);
 
     for (i = 0u; i < count; i++) {
-        (void)fprintf(stream, "%*zu |", TTY_MATRIX_ROW_WIDTH, i);
+        const int32_t row_cpu = (cpu_ids != NULL) ? cpu_ids[i] : (int32_t)i;
+
+        (void)fprintf(stream, "%*" PRId32 " |", TTY_MATRIX_ROW_WIDTH, row_cpu);
         for (j = 0u; j < count; j++) {
             char cell[32] = {0};
             const char *cell_color = NULL;
@@ -816,7 +884,7 @@ lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint6
             } else {
                 tty_matrix_format_latency(latency_ns[i * count + j], cell, sizeof(cell));
                 if (color) {
-                    cell_color = tty_matrix_cell_color(latency_ns[i * count + j]);
+                    cell_color = tty_matrix_cell_color(latency_ns[i * count + j], fast_ns, slow_ns);
                 }
             }
 
@@ -835,7 +903,13 @@ lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint6
         (void)fprintf(stream,
                       "  legend: <= %" PRIu64 " ns fast, <= %" PRIu64 " ns mid, > %" PRIu64
                       " ns slow\n",
-                      TTY_MATRIX_FAST_NS, TTY_MATRIX_SLOW_NS, TTY_MATRIX_SLOW_NS);
+                      fast_ns, slow_ns, slow_ns);
     }
     return LB_STATUS_OK;
+}
+
+lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint64_t *latency_ns,
+                             size_t count)
+{
+    return tty_print_matrix_cpus(cfg, title, NULL, latency_ns, count);
 }

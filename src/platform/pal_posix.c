@@ -132,6 +132,11 @@ size_t pal_mem_size(const pal_mem_t *mem)
     return mem->size;
 }
 
+bool pal_mem_is_thp(const pal_mem_t *mem)
+{
+    return (mem != NULL) && mem->thp_active;
+}
+
 void pal_mem_free(pal_mem_t *mem)
 {
     if (mem == NULL) {
@@ -990,6 +995,24 @@ lb_status_t pal_os_sleep_us(uint32_t target_us, uint32_t samples, uint64_t *samp
     return LB_STATUS_OK;
 }
 
+#if !defined(__linux__)
+lb_status_t pal_os_swap_probe(size_t max_pages, uint64_t *samples_ns, size_t capacity,
+                              size_t *out_count, pal_os_swap_result_t *out)
+{
+    if (out_count != NULL) {
+        *out_count = 0u;
+    }
+    if (out != NULL) {
+        *out = (pal_os_swap_result_t){0};
+    }
+    if (max_pages == 0u || samples_ns == NULL || out_count == NULL || out == NULL ||
+        capacity < max_pages) {
+        return LB_STATUS_INVALID_ARG;
+    }
+    return LB_STATUS_UNSUPPORTED;
+}
+#endif /* !__linux__ */
+
 /*
  * Platform-neutral fallbacks. Linux and macOS provide their own
  * implementations; this block keeps a plain POSIX target buildable.
@@ -1045,6 +1068,34 @@ uint32_t pal_cpu_count(void)
     return (uint32_t)count;
 }
 
+lb_status_t pal_cpu_list(int32_t *cpus, size_t capacity, size_t *out_count)
+{
+    size_t count = 0u;
+    size_t i = 0u;
+
+    if (out_count != NULL) {
+        *out_count = 0u;
+    }
+    if (cpus == NULL || capacity == 0u || out_count == NULL) {
+        return LB_STATUS_INVALID_ARG;
+    }
+
+    count = (size_t)pal_cpu_count();
+    if (count > capacity) {
+        count = capacity;
+    }
+    for (i = 0u; i < count; i++) {
+        cpus[i] = (int32_t)i;
+    }
+    *out_count = count;
+    return LB_STATUS_OK;
+}
+
+lb_thp_mode_t pal_thp_mode(void)
+{
+    return LB_THP_UNSUPPORTED;
+}
+
 lb_status_t pal_pin_cpu(int32_t cpu_id)
 {
     (void)cpu_id;
@@ -1090,6 +1141,7 @@ pal_mem_t *pal_mem_alloc(size_t size, uint32_t flags)
     mem->base = base;
     mem->mapped_size = 0u;
     mem->size = size;
+    mem->thp_active = false;
     return mem;
 
 cleanup:

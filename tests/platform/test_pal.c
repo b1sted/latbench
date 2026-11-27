@@ -141,6 +141,48 @@ static void test_mem_odd_size(void)
     }
 }
 
+static void test_thp(void)
+{
+    const lb_thp_mode_t mode = pal_thp_mode();
+    const size_t size = 4u * 1024u * 1024u;
+    pal_mem_t *mem = NULL;
+    pal_mem_t *plain = NULL;
+
+    check_true(mode == LB_THP_UNSUPPORTED || mode == LB_THP_ALWAYS || mode == LB_THP_MADVISE ||
+                   mode == LB_THP_NEVER,
+               "pal_thp_mode returns a valid policy");
+    check_true(!pal_mem_is_thp(NULL), "pal_mem_is_thp(NULL) is false");
+
+    mem = pal_mem_alloc(size, PAL_MEM_THP);
+    check_true(mem != NULL, "pal_mem_alloc(THP) returns a 4 MiB arena");
+    if (mem != NULL) {
+        unsigned char *data = pal_mem_data(mem);
+
+        check_true(data != NULL, "THP arena exposes storage");
+        if (data != NULL) {
+            data[0] = (unsigned char)0x5au;
+            data[size - 1u] = (unsigned char)0xa5u;
+            check_true(data[0] == (unsigned char)0x5au && data[size - 1u] == (unsigned char)0xa5u,
+                       "THP arena storage is writable end to end");
+        }
+        if (mode == LB_THP_NEVER || mode == LB_THP_UNSUPPORTED) {
+            check_true(!pal_mem_is_thp(mem), "THP arena is not huge-page backed when disabled");
+        }
+        if (pal_mem_is_thp(mem)) {
+            check_true(mode == LB_THP_ALWAYS || mode == LB_THP_MADVISE,
+                       "pal_mem_is_thp agrees with the active THP policy");
+        }
+        pal_mem_free(mem);
+    }
+
+    plain = pal_mem_alloc(size, PAL_MEM_NO_THP);
+    check_true(plain != NULL, "pal_mem_alloc(NO_THP) returns a 4 MiB arena");
+    if (plain != NULL) {
+        check_true(!pal_mem_is_thp(plain), "NO_THP arena is not huge-page backed");
+        pal_mem_free(plain);
+    }
+}
+
 static void test_arch_name(void)
 {
     const char *arch = pal_arch_name();
@@ -166,6 +208,49 @@ static void test_cpu_and_pinning(void)
     status = pal_pin_cpu(-1);
     check_true(status == LB_STATUS_INVALID_ARG || status == LB_STATUS_UNSUPPORTED,
                "pal_pin_cpu(-1) is rejected");
+}
+
+static void test_cpu_list(void)
+{
+    int32_t cpus[64] = {0};
+    int32_t single[2] = {-1, -1};
+    size_t count = 123u;
+    size_t i = 0u;
+    bool ascending = true;
+    bool nonnegative = true;
+
+    check_true(pal_cpu_list(NULL, 64u, &count) == LB_STATUS_INVALID_ARG,
+               "pal_cpu_list rejects NULL cpus");
+    check_true(count == 0u, "pal_cpu_list zeroes out_count when cpus is NULL");
+
+    count = 123u;
+    check_true(pal_cpu_list(cpus, 0u, &count) == LB_STATUS_INVALID_ARG,
+               "pal_cpu_list rejects zero capacity");
+    check_true(count == 0u, "pal_cpu_list zeroes out_count when capacity is zero");
+
+    check_true(pal_cpu_list(cpus, 64u, NULL) == LB_STATUS_INVALID_ARG,
+               "pal_cpu_list rejects NULL out_count");
+
+    count = 0u;
+    check_true(pal_cpu_list(cpus, 64u, &count) == LB_STATUS_OK, "pal_cpu_list reports CPUs");
+    check_true(count >= 1u && count <= 64u, "pal_cpu_list returns a bounded CPU count");
+    for (i = 0u; i < count; i++) {
+        if (cpus[i] < 0) {
+            nonnegative = false;
+        }
+        if (i > 0u && cpus[i] <= cpus[i - 1u]) {
+            ascending = false;
+        }
+    }
+    check_true(nonnegative, "pal_cpu_list reports non-negative CPU IDs");
+    check_true(ascending, "pal_cpu_list reports CPU IDs in strictly ascending order");
+
+    count = 0u;
+    check_true(pal_cpu_list(single, 1u, &count) == LB_STATUS_OK,
+               "pal_cpu_list accepts a single-slot buffer");
+    check_true(count == 1u, "pal_cpu_list honors a one-CPU capacity");
+    check_true(single[0] >= 0, "pal_cpu_list fills the single CPU slot");
+    check_true(single[1] == -1, "pal_cpu_list writes only within capacity");
 }
 
 static void test_qos(void)
@@ -389,6 +474,53 @@ static void test_os_sleep(void)
                "pal_os_sleep_us rejects a capacity smaller than the sample count");
 }
 
+static void test_os_swap(void)
+{
+    uint64_t samples[64] = {0u};
+    pal_os_swap_result_t result = {0};
+    size_t count = 99u;
+    lb_status_t status = LB_STATUS_ERROR;
+
+    check_true(pal_os_swap_probe(0u, samples, 64u, &count, &result) == LB_STATUS_INVALID_ARG,
+               "pal_os_swap_probe rejects zero pages");
+    check_true(count == 0u, "pal_os_swap_probe zeroes out_count on invalid args");
+
+    count = 99u;
+    check_true(pal_os_swap_probe(64u, NULL, 64u, &count, &result) == LB_STATUS_INVALID_ARG,
+               "pal_os_swap_probe rejects NULL samples");
+
+    count = 99u;
+    check_true(pal_os_swap_probe(64u, samples, 32u, &count, &result) == LB_STATUS_INVALID_ARG,
+               "pal_os_swap_probe rejects capacity below max_pages");
+
+    count = 99u;
+    check_true(pal_os_swap_probe(64u, samples, 64u, NULL, &result) == LB_STATUS_INVALID_ARG,
+               "pal_os_swap_probe rejects NULL out_count");
+    check_true(pal_os_swap_probe(64u, samples, 64u, &count, NULL) == LB_STATUS_INVALID_ARG,
+               "pal_os_swap_probe rejects NULL out");
+
+    count = 0u;
+    status = pal_os_swap_probe(64u, samples, 64u, &count, &result);
+    check_true(status == LB_STATUS_OK || status == LB_STATUS_UNSUPPORTED,
+               "pal_os_swap_probe succeeds or reports unsupported");
+    if (status == LB_STATUS_OK) {
+        bool nonzero = true;
+        size_t i = 0u;
+
+        check_true(count > 0u, "pal_os_swap_probe reports at least one page");
+        check_true(result.pages == (uint64_t)count, "pal_os_swap_probe pages matches out_count");
+        check_true(result.elapsed_ns > 0u, "pal_os_swap_probe measures a nonzero duration");
+        for (i = 0u; i < count; i++) {
+            if (samples[i] == 0u) {
+                nonzero = false;
+            }
+        }
+        check_true(nonzero, "pal_os_swap_probe records per-page samples");
+    } else {
+        printf("SKIP: swap-in latency probe is unsupported on this host\n");
+    }
+}
+
 static void test_compiler_primitives(void)
 {
     const uint32_t values[4] = {1u, 2u, 3u, 4u};
@@ -418,8 +550,10 @@ int main(void)
     test_mem_alloc_ok(PAL_MEM_NO_THP, "pal_mem_alloc(NO_THP) returns a handle");
     test_mem_alloc_ok(PAL_MEM_THP, "pal_mem_alloc(THP) returns a handle");
     test_mem_odd_size();
+    test_thp();
     test_arch_name();
     test_cpu_and_pinning();
+    test_cpu_list();
     test_qos();
     test_thread_lifecycle();
     test_thread_pinned();
@@ -434,6 +568,7 @@ int main(void)
     test_os_sig();
     test_os_sig_blocked();
     test_os_sleep();
+    test_os_swap();
     test_compiler_primitives();
 
     printf("test_pal: %d checks, %d failures\n", g_checks, g_failures);

@@ -160,6 +160,10 @@ int main(void)
         fprintf(stderr, "FAIL: auto did not publish the CPU count\n");
         failures++;
     }
+    if (!(passport->ram_ns > 0.0)) {
+        fprintf(stderr, "FAIL: auto did not publish the RAM latency\n");
+        failures++;
+    }
 
     if (captured) {
         if (strstr(output, TEST_CSV_HEADER) != output) {
@@ -192,6 +196,22 @@ int main(void)
         }
         if (strstr(output, TEST_PASSPORT_PREFIX) == NULL) {
             fprintf(stderr, "FAIL: auto CSV contains no passport records\n");
+            failures++;
+        }
+        if (strstr(output, "auto,passport,l1d_ns,") == NULL) {
+            fprintf(stderr, "FAIL: auto CSV has no l1d nanosecond row\n");
+            failures++;
+        }
+        if (strstr(output, "auto,passport,l2_ns,") == NULL) {
+            fprintf(stderr, "FAIL: auto CSV has no l2 nanosecond row\n");
+            failures++;
+        }
+        if (strstr(output, "auto,passport,l3_ns,") == NULL) {
+            fprintf(stderr, "FAIL: auto CSV has no l3 nanosecond row\n");
+            failures++;
+        }
+        if (strstr(output, "auto,passport,ram_ns,") == NULL) {
+            fprintf(stderr, "FAIL: auto CSV has no ram nanosecond row\n");
             failures++;
         }
     }

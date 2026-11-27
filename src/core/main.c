@@ -17,15 +17,15 @@
 #include "util.h"
 
 #ifndef LB_VERSION
-#define LB_VERSION "0.1.0"
+#define LB_VERSION "0.2.0"
 #endif
 #define LB_DEFAULT_BATCH_MS 20u
 #define LB_DEFAULT_COOL_MS 0u
 
 #define LB_SELFTEST_MAX_NODES 4096u
 #define LB_SELFTEST_CHAIN_NODES 4096u
-#define LB_SELFTEST_CHASE_BASE UINT64_C(1048576)
-#define LB_SELFTEST_CHASE_ROUNDS 3u
+#define LB_SELFTEST_CHASE_BASE UINT64_C(2097152)
+#define LB_SELFTEST_CHASE_ROUNDS 5u
 #define LB_SELFTEST_RATIO_MIN 1.6
 
 /* Branch sanity: an unpredictable 50/50 pattern must pay a mispredict penalty. */
@@ -94,6 +94,7 @@ static const lb_subtest_t BRANCH_SUBTESTS[] = {
 static const lb_subtest_t DRAM_SUBTESTS[] = {
     {"bw", "sequential read, write, and copy bandwidth", dram_bw_run},
     {"row", "DRAM row-buffer locality versus random page switches", dram_row_run},
+    {"lat", "pure DRAM latency (THP) versus 4 KiB page-walk penalty", dram_lat_run},
 };
 
 static const lb_subtest_t TOPO_SUBTESTS[] = {
@@ -110,6 +111,7 @@ static const lb_subtest_t OS_SUBTESTS[] = {
     {"fork", "fork, child _exit(0), and parent waitpid cost", os_fork_run},
     {"sig", "self-delivered SIGUSR1 signal round trip", os_sig_run},
     {"sleep", "nanosleep overshoot at 1 us and 100 us targets", os_sleep_run},
+    {"swap", "pageout via MADV_PAGEOUT and random swap-in fault latency", os_swap_run},
 };
 
 static const lb_module_t BENCH_MODULES[] = {
@@ -285,7 +287,7 @@ static bool lb_selftest_chase_check(const lb_cfg_t *cfg)
     }
 
     /* Warm the chain, its cache lines, and the clock path before timing. */
-    (void)lb_selftest_chase(&nodes[0], (uint64_t)LB_SELFTEST_CHAIN_NODES);
+    (void)lb_selftest_chase(&nodes[0], base_hops);
 
     for (round = 0u; round < LB_SELFTEST_CHASE_ROUNDS; round++) {
         uint64_t begin = pal_now_ns();
@@ -607,6 +609,9 @@ static void print_module_options(const lb_cfg_t *cfg, const lb_module_t *module)
     if (strcmp(module->name, "os") == 0) {
         help_line(cfg, "--mode <mode>", "context switch mode (thread|proc, default both)");
     }
+    if (strcmp(module->name, "dram") == 0) {
+        help_line(cfg, "--threads <n>", "worker threads for dram bw (default: auto)");
+    }
 
     help_line(cfg, "--csv", "emit CSV to stdout; diagnostics to stderr");
     help_line(cfg, "--no-color", "disable color output");
@@ -641,6 +646,7 @@ static void print_help(const lb_cfg_t *cfg)
     help_line(cfg, "--write", "modify words during mem size walk (dirty write-back)");
     help_line(cfg, "--long", "extend sys throttle duration to 10 seconds");
     help_line(cfg, "--mode <mode>", "handoff/switch mode (cas|flag, thread|proc)");
+    help_line(cfg, "--threads <n>", "worker threads for dram bw (default: auto)");
     help_line(cfg, "--no-timing", "skip selftest ratio thresholds (for emulators)");
     help_line(cfg, "--csv", "emit CSV to stdout; diagnostics to stderr");
     help_line(cfg, "--no-color", "disable color output");
@@ -792,6 +798,7 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
     const char *positionals[2] = {NULL, NULL};
     int positional_count = 0;
     int i = 0;
+    bool threads_set = false;
 
     *mode_set = false;
     *mode_is_topo = false;
@@ -822,10 +829,12 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
         }
         if (strcmp(arg, "--no-thp") == 0) {
             cfg->no_thp = true;
+            cfg->thp_set = true;
             continue;
         }
         if (strcmp(arg, "--thp") == 0) {
             cfg->no_thp = false;
+            cfg->thp_set = true;
             continue;
         }
         if (strcmp(arg, "--write") == 0) {
@@ -872,7 +881,7 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
 
         if (strcmp(arg, "--cpu") == 0 || strcmp(arg, "--qos") == 0 ||
             strcmp(arg, "--max-mem") == 0 || strcmp(arg, "--batch-ms") == 0 ||
-            strcmp(arg, "--cool-ms") == 0) {
+            strcmp(arg, "--cool-ms") == 0 || strcmp(arg, "--threads") == 0) {
             const char *value = NULL;
 
             if (i + 1 >= argc) {
@@ -898,6 +907,15 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
                 if (parse_u32_option(arg, value, &cfg->batch_ms) != LB_STATUS_OK) {
                     return LB_STATUS_INVALID_ARG;
                 }
+            } else if (strcmp(arg, "--threads") == 0) {
+                if (parse_u32_option(arg, value, &cfg->threads) != LB_STATUS_OK) {
+                    return LB_STATUS_INVALID_ARG;
+                }
+                if (cfg->threads == 0u) {
+                    tty_err("invalid value for --threads: '%s' (must be >= 1)", value);
+                    return LB_STATUS_INVALID_ARG;
+                }
+                threads_set = true;
             } else {
                 if (parse_u32_option(arg, value, &cfg->cool_ms) != LB_STATUS_OK) {
                     return LB_STATUS_INVALID_ARG;
@@ -921,6 +939,14 @@ static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_h
 
     *module_name = positionals[0];
     *subtest_name = positionals[1];
+
+    if (threads_set && !*show_help) {
+        if (positionals[0] == NULL || positionals[1] == NULL ||
+            strcmp(positionals[0], "dram") != 0 || strcmp(positionals[1], "bw") != 0) {
+            tty_err("--threads is only valid for 'dram bw'");
+            return LB_STATUS_INVALID_ARG;
+        }
+    }
     return LB_STATUS_OK;
 }
 
@@ -944,6 +970,8 @@ int main(int argc, char **argv)
     cfg.batch_ms = LB_DEFAULT_BATCH_MS;
     cfg.cool_ms = LB_DEFAULT_COOL_MS;
     cfg.no_thp = true;
+    cfg.thp_set = false;
+    cfg.threads = 0u;
     cfg.csv = false;
     cfg.no_color = false;
     cfg.write = false;

@@ -36,20 +36,20 @@
 Dependency-free latency and microarchitecture benchmarking tool written in strict ISO C99 for Linux, macOS, and Android/Termux.
 
 <br>
-<p align="center"><img src="docs/demo.png" alt="latbench demo" width="850"/><br><em>latbench v0.1.0 on Arch Linux (AMD Ryzen 7 7840H)</em></p>
+<p align="center"><img src="docs/demo.png" alt="latbench demo" width="850"/><br><em>latbench on Arch Linux (AMD Ryzen 7 7840H)</em></p>
 <br>
 
 ## Features
 
 - **`sys`**: Timer calibration, `pal_now_ns()` call overhead, and thermal throttling behaviour under sustained load.
-- **`mem`**: Cache capacity (L1d, L2, L3) via the Sattolo single-cycle walk, cache-line size detection, L1d associativity from set conflicts, and prefetcher behaviour.
+- **`mem`**: Cache capacity (L1d, L2, L3) via the Sattolo single-cycle walk, cache-line boundary estimation from stride latency, L1d associativity from set conflicts, and prefetcher behaviour.
 - **`tlb`**: L1 dTLB and L2 STLB capacity over a hardware-aligned page grid, plus first-touch page-fault cost versus a warm second pass.
-- **`core`**: ILP with independent ALU/FPU chains on the execution ports, MLP through a parallel pointer chase, unaligned read latency, and Store-to-Load Forwarding, including partial and straddling `8B @ +4` overlaps.
-- **`branch`**: Predictor history depth, mispredict penalty, Return-Stack Buffer (RSB) capacity, and Indirect Branch / BTB capacity.
-- **`dram`**: Read, write, and copy bandwidth together with DRAM row-buffer locality.
-- **`topo`**: L1 atomics (`fetch_add`, `fence_seq`), the false-sharing (coherence line) boundary, and a core-to-core latency matrix (RTT/2) through CAS and flag ping-pong.
-- **`os`**: vDSO versus `sys_write` overhead, thread and process context switches (pipes), scheduler wakeup (`mutex+cond`), TLB shootdown (`mprotect`), `fork()`, `SIGUSR1` delivery, and `nanosleep` overshoot.
-- **`auto`**: Runs the full cycle of 26 key probes and prints a single `Passport:` card, or one flat `--csv` record.
+- **`core`**: ILP with independent ALU/FPU chains on the execution ports, MLP through a parallel pointer chase, unaligned read latency, and Store-to-Load Forwarding measured as a clean delta against the aligned `8B @ +0` baseline, including partial and straddling `8B @ +4` overlaps.
+- **`branch`**: Predictor history depth, mispredict penalty, Return-Stack Buffer (RSB) capacity up to 96 frames, and Indirect Branch / BTB capacity up to 4096 targets with a multi-callsite pressure sweep.
+- **`dram`**: Single- and multi-threaded read, write, and copy bandwidth (`--threads`), DRAM row-buffer locality, and pure DRAM latency comparing a 2 MiB THP arena with a 4 KiB page-walk pass.
+- **`topo`**: L1 atomics (`fetch_add`, `fence_seq`), the false-sharing (coherence line) boundary, and a core-to-core latency matrix (RTT/2) through CAS and flag ping-pong, using `pal_cpu_list()` and best-of-five batches per pair.
+- **`os`**: vDSO versus `sys_write` overhead, thread and process context switches (pipes), scheduler wakeup (`mutex+cond`), TLB shootdown (`mprotect`), `fork()`, `SIGUSR1` delivery, `nanosleep` overshoot, and, on Linux only, swap-in latency via `/proc/swaps` and `MADV_PAGEOUT` (`os swap`, not part of `auto`).
+- **`auto`**: Runs the full cycle of 27 key probes and prints a single `Passport:` card, or a machine-readable `--csv` table. Transparent huge pages are enabled automatically when the kernel supports them and neither `--thp` nor `--no-thp` was given.
 - **Zero bloat**: Clean ISO C99, no external dependencies, and an isolated platform abstraction layer (PAL).
 
 ## Architecture
@@ -62,11 +62,10 @@ include/            Public headers shared across core, bench, and PAL
 src/core/           Portable engine: CLI, stats, step detector, TTY plots, main
 src/bench/          Benchmark suites (sys, mem, tlb, core, branch, dram, topo, os)
 src/platform/       Platform implementations
-  posix/            POSIX.1-2008 fallbacks
-  linux-common/     Shared Linux/Android implementation (incl. Luckfox)
-  linux/            Linux-specific implementation (affinity, madvise/THP)
-  android/          Android/Termux-specific adjustments (Bionic)
-  macos/            macOS-specific implementation (mach_absolute_time, QoS)
+  pal_posix.c       POSIX.1-2008 fallbacks (threads, pipes, signals, mappings)
+  pal_linux.c       Linux/Android specifics (affinity, THP, /proc, MADV_PAGEOUT)
+  pal_macos.c       macOS specifics (mach_absolute_time, QoS, sysctl)
+  pal_internal.h    Private pal_mem and pal_thread layouts shared by the above
 tests/              Unit, integration, and optimizer self-tests
 ```
 
@@ -87,28 +86,29 @@ Passport:
   RAM                  27.1 GiB
   Logical CPUs         16
   Cache/TLB
-  L1d est.             ~32 KiB
+  L1d est.             ~32 KiB (0.85 ns)
   L1d ways             8
-  L2/L3 est.           ~640 KiB / ~1.2 MiB
+  L2/L3 est.           ~1 MiB (2.97 ns) / ~5 MiB (51.90 ns)
   Coherence line       ~64 B
-  L1 dTLB est.         ~64 entries (256 KiB)
+  L1 dTLB est.         ~256 entries (1 MiB)
   Core/Branch
-  ALU/FPU ILP          8 chains (3.6x) / 8 chains (7.0x)
-  STLF stall           4.05 ns (8B @ +4)
+  ALU/FPU ILP          8 chains (3.5x) / 8 chains (7.2x)
+  STLF stall           2.48 ns (8B @ +4)
   RSB est.             ~24 frames
   BTB est.             ~32 targets
-  Branch mispredict    ~4.29 ns
+  Branch mispredict    ~4.60 ns
   DRAM/Topo
-  Read/Write BW        20.64 / 21.49 GiB/s
-  Row conflict delta   +63.24 ns (+89.7%)
-  Core-to-core min/med/max 21 / 28 / 36 ns
+  Read/Write BW        18.39 / 15.88 GiB/s
+  RAM lat              154.93 ns
+  Row conflict delta   +69.72 ns (+78.2%)
+  Core-to-core min/med/max 21 / 26 / 32 ns
   OS
-  Syscall              293.34 ns/call
-  Ctx thread/proc      3.734 / 2.616 us
-  Wakeup               3.176 us
-  Shootdown 1T/MT      1.877 / 3.230 us
-  Fork                 334.88 us
-  Sleep 1us            p50 54.63 us
+  Syscall              285.92 ns/call
+  Ctx thread/proc      3.554 / 4.243 us
+  Wakeup               3.534 us
+  Shootdown 1T/MT      1.892 / 4.027 us
+  Fork                 363.12 us
+  Sleep 1us            p50 54.19 us
 ```
 
 | Metric | Description |
@@ -117,17 +117,18 @@ Passport:
 | `Page size` | Base virtual-memory page size in bytes, used by the TLB probes. |
 | `RAM` | Total physical memory available to the process. |
 | `Logical CPUs` | Logical processors visible to the OS. |
-| `L1d est.` | First-level data cache capacity estimated with a Sattolo cycle walk. |
+| `L1d est.` | First-level data cache capacity estimated with a Sattolo cycle walk, with the measured plateau latency (`l1d_ns`). |
 | `L1d ways` | L1d associativity inferred from set-conflict strides. |
-| `L2/L3 est.` | Upper-level cache capacities from the same latency-plateau walk. |
+| `L2/L3 est.` | Upper-level cache capacities from the same latency-plateau walk, with their plateau latencies (`l2_ns`, `l3_ns`). |
 | `Coherence line` | Cache-line size derived from false-sharing and stride probes. |
 | `L1 dTLB est.` | First-level dTLB entry count and the address range it covers. |
 | `ALU/FPU ILP` | Independent chains that saturate the ALU and FPU ports, with speedup versus one chain. |
-| `STLF stall` | Store-to-Load Forwarding latency for the partial `8B @ +4` overlap. |
-| `RSB est.` | Return-Stack Buffer depth in call frames. |
-| `BTB est.` | Indirect-branch target capacity of the branch-target buffer. |
+| `STLF stall` | Worst partial-overlap store-forwarding delta (`4B @ +1` or `8B @ +4`) relative to the aligned `8B @ +0` baseline. |
+| `RSB est.` | Return-Stack Buffer depth in call frames (swept up to 96 frames). |
+| `BTB est.` | Indirect-branch target capacity of the branch-target buffer (swept up to 4096 targets). |
 | `Branch mispredict` | Penalty of a deliberately mispredicted branch. |
-| `Read/Write BW` | Single-thread DRAM read and write bandwidth. |
+| `Read/Write BW` | Single-thread DRAM read and write bandwidth; `dram bw` also prints multi-threaded figures. |
+| `RAM lat` | Pure DRAM latency from the THP pass of `dram lat` (`ram_ns`), or the 4 KiB pass when THP is unavailable. |
 | `Row conflict delta` | Extra latency caused by opening a different DRAM row. |
 | `Core-to-core` | Minimum, median, and maximum round-trip/2 latency between cores. |
 | `Syscall` | Cost of a minimal `sys_write` call, with vDSO comparison available in `os syscall`. |
@@ -138,7 +139,9 @@ Passport:
 | `Sleep 1us` | Median `nanosleep` overshoot for a 1 microsecond request. |
 
 Run `latbench <module> <subtest>` for the full per-probe output, or add
-`--csv` to `auto` to emit a single machine-readable record on `stdout`.
+`--csv` to `auto` to emit a `module,subtest,metric,value,unit` table on
+`stdout`. The passport rows include `l1d_ns`, `l2_ns`, `l3_ns`, and `ram_ns`
+alongside the capacity, bandwidth, branch, topology, and OS metrics.
 
 ## Supported Platforms
 
@@ -234,13 +237,13 @@ it locally:
 
 ```bash
 # Debian / Ubuntu
-sudo apt install ./latbench_0.1.0_*.deb
+sudo apt install ./latbench_0.2.0_*.deb
 
 # Fedora / RHEL / openSUSE
-sudo dnf install ./latbench-0.1.0.*.rpm
+sudo dnf install ./latbench-0.2.0.*.rpm
 
 # Arch Linux
-sudo pacman -U ./latbench-0.1.0-*.pkg.tar.zst
+sudo pacman -U ./latbench-0.2.0-*.pkg.tar.zst
 ```
 
 </details>
@@ -270,7 +273,7 @@ confused with the native Linux packages, while the installed package name is
 `latbench`:
 
 ```bash
-pkg install ./latbench-termux_0.1.0_*.deb
+pkg install ./latbench-termux_0.2.0_*.deb
 ```
 
 </details>
@@ -351,10 +354,12 @@ The full option list:
 | --- | --- |
 | `--cpu <id>` | Pin the worker to logical CPU `<id>`. |
 | `--qos <perf\|bg>` | Request `perf` or `bg` QoS (macOS). |
-| `--max-mem <MiB>` | Cap the arena size (default: 25% of RAM). |
+| `--max-mem <MiB>` | Cap the arena size (default: 25% of RAM; `dram bw` caps at 512 MiB and `dram lat` at 256 MiB). |
 | `--batch-ms <ms>` | Measurement batch duration (default: 20). |
 | `--cool-ms <ms>` | Cool-down between batches (default: 0). |
-| `--no-thp` / `--thp` | Avoid or allow transparent huge pages (default: `--no-thp`). |
+| `--no-thp` / `--thp` | Avoid or allow transparent huge pages. The standalone default is `--no-thp`; `auto` enables THP when the kernel reports `always` or `madvise` and neither flag was given explicitly. |
+| `--threads <n>` | Worker threads for `dram bw` (default: auto, one per available CPU; capped at 64 and by the minimum slice size). Only valid for `dram bw`. |
+| `--no-timing` | Skip the hardware ratio thresholds in `selftest` (for emulators and very noisy hosts). Only valid for `selftest`. |
 | `--write` | Modify words during the memory size walk (dirty write-back). |
 | `--long` | Extend the `sys throttle` duration to 10 seconds. |
 | `--mode <mode>` | Handoff/switch mode: `cas`/`flag` for `topo pingpong`, `thread`/`proc` for `os ctx`. |
@@ -367,7 +372,7 @@ The full option list:
 
 ```bash
 ./build/bin/latbench -V
-# latbench v0.1.0 (x86_64)
+# latbench v0.2.0 (x86_64)
 ```
 
 `make test` runs the unit tests and then executes `./build/bin/latbench selftest`
@@ -377,6 +382,13 @@ tests under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 The `Tests and Linters` GitHub Actions workflow runs `make test`, the QEMU
 cross-architecture self-tests, `make leaks`, and `make lint`.
+
+The manual `RISC-V 64 Live Calibration` workflow (`riscv64.yml`) runs the same
+strict build and tests on RISE RISC-V Runners (`ubuntu-24.04-riscv`). It can
+optionally execute `make leaks`, a live `auto` calibration (human-readable and
+CSV), and standalone `mem line`, `dram lat`, `dram bw`, `topo pingpong`, and
+`os swap` probes, then uploads the host environment, passport CSV, and text
+logs as build artifacts.
 
 ## License
 

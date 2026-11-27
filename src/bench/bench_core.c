@@ -54,6 +54,7 @@
 #define CORE_STLF_CASES 6u
 #define CORE_STLF_STRADDLE_OFFSET 4u
 #define CORE_STLF_MIN_BUFFER_BYTES 8192u
+#define CORE_STLF_STALL_MIN_NS 0.25
 
 /* Compact auto mode: fewer iterations and repeats; the arena stays above L3. */
 #define CORE_FAST_REPEATS 2u
@@ -970,6 +971,7 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
     uint64_t baseline = 0u;
     uint64_t seed = UINT64_C(0x9e3779b97f4a7c15);
     size_t case_index = 0u;
+    double base_ns = 0.0;
     double worst_stall_ns = 0.0;
     const char *worst_name = NULL;
     lb_status_t status = LB_STATUS_NOMEM;
@@ -1022,14 +1024,15 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
         tty_kv(cfg, "Iterations / repeats", "%" PRIu64 " / %zu", iterations, repeats);
     }
     tty_blank(cfg);
-    tty_header(cfg, "  %-12s %12s", "Variant", "ns/op");
-    tty_csv_row(cfg, "core,stlf,variant,ns_per_op");
+    tty_header(cfg, "  %-12s %12s %12s", "Variant", "ns/op", "delta ns");
+    tty_csv_row(cfg, "core,stlf,variant,ns_per_op,delta_ns");
 
     baseline = stats_canary_baseline(LB_BENCH_CANARY_MS);
 
     for (case_index = 0u; case_index < CORE_STLF_CASES; case_index++) {
         double samples[CORE_STLF_REPEATS] = {0.0};
         double ns_per_op = 0.0;
+        double delta_ns = 0.0;
         size_t repeat = 0u;
 
         (void)CORE_STLF_FNS[case_index](base, page_size, iterations / 20u, offset);
@@ -1040,18 +1043,28 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
         lb_bench_cool(cfg);
 
         ns_per_op = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
+        if (case_index == 0u) {
+            base_ns = ns_per_op;
+        }
+        delta_ns = ns_per_op - base_ns;
         if (case_index == 2u || case_index == 4u) {
-            if (ns_per_op > worst_stall_ns) {
-                worst_stall_ns = ns_per_op;
+            if (delta_ns > worst_stall_ns) {
+                worst_stall_ns = delta_ns;
                 worst_name = CORE_STLF_NAMES[case_index];
             }
         }
-        tty_header(cfg, "  %-12s %12.4f", CORE_STLF_NAMES[case_index], ns_per_op);
-        tty_csv_row(cfg, "core,stlf,%s,%.4f", CORE_STLF_NAMES[case_index], ns_per_op);
+        tty_header(cfg, "  %-12s %12.4f %+12.4f", CORE_STLF_NAMES[case_index], ns_per_op, delta_ns);
+        tty_csv_row(cfg, "core,stlf,%s,%.4f,%.4f", CORE_STLF_NAMES[case_index], ns_per_op,
+                    delta_ns);
     }
 
-    lb_passport_mutable()->stlf_stall_ns = worst_stall_ns;
-    lb_passport_mutable()->stlf_variant = worst_name;
+    if (worst_stall_ns > CORE_STLF_STALL_MIN_NS) {
+        lb_passport_mutable()->stlf_stall_ns = worst_stall_ns;
+        lb_passport_mutable()->stlf_variant = worst_name;
+    } else {
+        lb_passport_mutable()->stlf_stall_ns = 0.0;
+        lb_passport_mutable()->stlf_variant = NULL;
+    }
 
     tty_blank(cfg);
     lb_bench_canary_finish(cfg, baseline, true);

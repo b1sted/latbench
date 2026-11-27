@@ -100,6 +100,21 @@ lb_status_t tty_plot_series_ex(const lb_cfg_t *cfg, const stats_series_t *series
 lb_status_t tty_print_matrix(const lb_cfg_t *cfg, const char *title, const uint64_t *latency_ns,
                              size_t count);
 
+/*
+ * Render an N x N CPU-to-CPU latency matrix using the caller's logical CPU ids.
+ * cpu_ids supplies the heading for each row and column and must contain count
+ * non-negative entries; when it is NULL the renderer falls back to ids
+ * 0..count-1. latency_ns uses the same row-major layout as tty_print_matrix().
+ * The heatmap thresholds adapt to the fastest off-diagonal latency so slow
+ * platforms do not turn the whole table red, while x86 and Apple Silicon keep
+ * the fixed 30 ns / 80 ns boundaries.
+ *
+ * Returns LB_STATUS_INVALID_ARG for a NULL matrix, an empty or oversized table,
+ * or a negative entry in cpu_ids.
+ */
+lb_status_t tty_print_matrix_cpus(const lb_cfg_t *cfg, const char *title, const int32_t *cpu_ids,
+                                  const uint64_t *latency_ns, size_t count);
+
 /* Render a byte count as a binary unit, for example "27.08 GiB". */
 const char *tty_format_bytes(uint64_t bytes, char *out, size_t capacity);
 
