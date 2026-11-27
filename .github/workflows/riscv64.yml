@@ -1,0 +1,94 @@
+name: RISC-V 64 Live Calibration
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_auto:
+        description: 'Run latbench auto calibration (human + CSV)'
+        required: false
+        type: boolean
+        default: true
+      run_extra:
+        description: 'Run standalone probes (mem line, dram lat/bw, os swap, topo pingpong)'
+        required: false
+        type: boolean
+        default: false
+      run_leaks:
+        description: 'Run ASan/UBSan test suite (make leaks)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: riscv64-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  riscv64:
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Toolchain & host info
+        run: |
+          set -eu
+          if ! command -v cc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends build-essential
+          fi
+          mkdir -p build
+          {
+            uname -a
+            cc --version
+            lscpu || true
+            cat /sys/kernel/mm/transparent_hugepage/enabled || true
+            cat /proc/swaps || true
+          } > build/riscv64-env.txt
+
+      - name: Build & strict tests
+        run: make clean && make style-check && make dev && make test
+
+      - name: Optional ASan/UBSan (make leaks)
+        if: ${{ inputs.run_leaks }}
+        run: make leaks
+
+      - name: Optional live auto calibration
+        if: ${{ inputs.run_auto }}
+        run: |
+          set -eu
+          {
+            ./build/bin/latbench -V
+            ./build/bin/latbench sys info --no-color
+            ./build/bin/latbench sys timer --no-color
+            ./build/bin/latbench auto --no-color
+          } > build/riscv64-auto.txt
+          ./build/bin/latbench auto --csv > build/riscv64-passport.csv
+
+      - name: Optional extra probes
+        if: ${{ inputs.run_extra }}
+        run: |
+          set -eu
+          {
+            ./build/bin/latbench mem line --no-color
+            ./build/bin/latbench dram lat --no-color
+            ./build/bin/latbench dram bw --no-color
+            ./build/bin/latbench topo pingpong --no-color
+            ./build/bin/latbench os swap --no-color
+          } > build/riscv64-extra.txt
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: riscv64-calibration-${{ github.run_number }}
+          if-no-files-found: ignore
+          path: |
+            build/riscv64-env.txt
+            build/riscv64-auto.txt
+            build/riscv64-passport.csv
+            build/riscv64-extra.txt
