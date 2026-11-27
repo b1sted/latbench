@@ -447,6 +447,97 @@ static void test_matrix_csv(void)
     }
 }
 
+static void test_plot_null_steps(void)
+{
+    stats_series_t *series = make_series();
+    lb_cfg_t cfg = {0};
+    char output[TEST_CAPTURE_SIZE] = {0};
+
+    check_true(series != NULL, "null-steps series is created");
+    if (series == NULL) {
+        return;
+    }
+
+    cfg.no_color = true;
+    cfg.csv = false;
+    tty_set_no_color(true);
+    tty_reset_csv_headers();
+
+    check_true(capture_start(TEST_CAPTURE_OUT), "null-steps capture starts");
+    if (g_stdout_captured) {
+        check_true(tty_plot_series(&cfg, series, NULL, NULL, 0u, 0u) == LB_STATUS_OK,
+                   "plot without a step detector succeeds");
+        (void)capture_read(TEST_CAPTURE_OUT, output, sizeof(output));
+
+        check_true(strstr(output, "Estimated thresholds") == NULL,
+                   "plot without a step detector omits the threshold prose");
+        check_true(strstr(output, "Size") != NULL, "null-steps table keeps its size column");
+        check_true(strstr(output, "p10 ns") != NULL, "null-steps table keeps its latency column");
+        check_true(strstr(output, "cache-sweep") != NULL, "null-steps table keeps its heading");
+        check_true(lines_fit(output, TEST_PLOT_WIDTH), "null-steps table stays within 80 columns");
+    }
+
+    stats_series_free(series);
+}
+
+static const uint64_t TEST_MATRIX_SPARSE[9] = {
+    0u, 12u, 42u, 11u, 0u, 38u, 40u, 39u, 0u,
+};
+
+static void test_matrix_cpus_table(void)
+{
+    const int32_t cpus[3] = {2, 5, 9};
+    lb_cfg_t cfg = {0};
+    char output[TEST_CAPTURE_SIZE] = {0};
+
+    cfg.no_color = true;
+    cfg.csv = false;
+    tty_set_no_color(true);
+
+    check_true(capture_start(TEST_CAPTURE_OUT), "sparse CPU matrix capture starts");
+    if (g_stdout_captured) {
+        check_true(tty_print_matrix_cpus(&cfg, "Sparse CPUs", cpus, TEST_MATRIX_SPARSE, 3u) ==
+                       LB_STATUS_OK,
+                   "sparse CPU matrix print succeeds");
+        (void)capture_read(TEST_CAPTURE_OUT, output, sizeof(output));
+
+        check_true(strstr(output, "  2 |") != NULL, "sparse matrix prints row cpu 2");
+        check_true(strstr(output, "  5 |") != NULL, "sparse matrix prints row cpu 5");
+        check_true(strstr(output, "  9 |") != NULL, "sparse matrix prints row cpu 9");
+        check_true(strstr(output, "  0 |") == NULL, "sparse matrix does not invent row cpu 0");
+        check_true(lines_fit(output, TEST_PLOT_WIDTH), "sparse CPU matrix stays within 80 columns");
+    }
+}
+
+static void test_matrix_cpus_csv(void)
+{
+    const int32_t cpus[3] = {2, 5, 9};
+    lb_cfg_t cfg = {0};
+    char output[TEST_CAPTURE_SIZE] = {0};
+
+    cfg.no_color = true;
+    cfg.csv = true;
+    tty_set_no_color(true);
+    tty_reset_csv_headers();
+
+    check_true(capture_start(TEST_CAPTURE_CSV), "sparse CPU matrix CSV capture starts");
+    if (g_stdout_captured) {
+        check_true(tty_print_matrix_cpus(&cfg, "Sparse CPUs", cpus, TEST_MATRIX_SPARSE, 3u) ==
+                       LB_STATUS_OK,
+                   "sparse CPU matrix CSV print succeeds");
+        (void)capture_read(TEST_CAPTURE_CSV, output, sizeof(output));
+
+        check_true(strstr(output, "cpu_a,cpu_b,latency_ns") == output,
+                   "sparse matrix CSV starts with a clean header");
+        check_true(strstr(output, "2,5,") != NULL, "sparse matrix CSV prints cpu 2 to cpu 5");
+        check_true(strstr(output, "9,5,") != NULL, "sparse matrix CSV prints cpu 9 to cpu 5");
+        check_true(strstr(output, "0,") == NULL, "sparse matrix CSV does not invent cpu 0");
+        check_true(strstr(output, "Sparse") == NULL, "sparse matrix CSV stdout has no prose");
+        check_true(count_lines(output) == 7u, "sparse matrix CSV has a header and six pairs");
+        check_true(csv_rows_valid_cols(output, 3u), "sparse matrix CSV rows have three columns");
+    }
+}
+
 int main(void)
 {
     test_plot_rejects_null_series();
@@ -454,9 +545,12 @@ int main(void)
     test_plot_pages();
     test_plot_csv();
     test_csv_headers_repeat();
+    test_plot_null_steps();
     test_matrix_table();
     test_matrix_large_cells();
     test_matrix_csv();
+    test_matrix_cpus_table();
+    test_matrix_cpus_csv();
 
     if (g_stdout_captured) {
         (void)fflush(stdout);
