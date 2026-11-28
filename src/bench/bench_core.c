@@ -797,8 +797,8 @@ static PAL_NOINLINE uint64_t core_stlf_full(uint8_t *buf, size_t page_size, uint
 {
     volatile size_t v_zero = 0u;
     volatile size_t v_off = offset;
-    uint8_t *p_wr = buf + v_zero;
-    const uint8_t *p_rd = buf + v_off;
+    uint8_t *p_wr = (uint8_t *)PAL_ASSUME_ALIGNED(buf + v_zero, 8u);
+    const uint8_t *p_rd = (const uint8_t *)PAL_ASSUME_ALIGNED(buf + v_off, 8u);
     uint64_t val = UINT64_C(1);
     uint64_t loaded = 0u;
     uint64_t i = 0u;
@@ -821,8 +821,8 @@ static PAL_NOINLINE uint64_t core_stlf_narrow4(uint8_t *buf, size_t page_size, u
 {
     volatile size_t v_zero = 0u;
     volatile size_t v_off = offset;
-    uint8_t *p_wr = buf + v_zero;
-    const uint8_t *p_rd = buf + v_off;
+    uint8_t *p_wr = (uint8_t *)PAL_ASSUME_ALIGNED(buf + v_zero, 8u);
+    const uint8_t *p_rd = (const uint8_t *)PAL_ASSUME_ALIGNED(buf + v_off, 4u);
     uint64_t val = UINT64_C(1);
     uint32_t loaded = 0u;
     uint64_t i = 0u;
@@ -845,7 +845,7 @@ static PAL_NOINLINE uint64_t core_stlf_partial4(uint8_t *buf, size_t page_size, 
 {
     volatile size_t v_zero = 0u;
     volatile size_t v_off = offset + 1u;
-    uint8_t *p_wr = buf + v_zero;
+    uint8_t *p_wr = (uint8_t *)PAL_ASSUME_ALIGNED(buf + v_zero, 8u);
     const uint8_t *p_rd = buf + v_off;
     uint64_t val = UINT64_C(1);
     uint32_t loaded = 0u;
@@ -874,8 +874,8 @@ static PAL_NOINLINE uint64_t core_stlf_straddle8(uint8_t *buf, size_t page_size,
 {
     volatile size_t v_zero = 0u;
     volatile size_t v_off = offset + CORE_STLF_STRADDLE_OFFSET;
-    uint8_t *p_wr = buf + v_zero;
-    const uint8_t *p_rd = buf + v_off;
+    uint8_t *p_wr = (uint8_t *)PAL_ASSUME_ALIGNED(buf + v_zero, 8u);
+    const uint8_t *p_rd = (const uint8_t *)PAL_ASSUME_ALIGNED(buf + v_off, 4u);
     uint64_t val = UINT64_C(1);
     uint64_t loaded = 0u;
     uint64_t i = 0u;
@@ -898,7 +898,7 @@ static PAL_NOINLINE uint64_t core_stlf_partial1(uint8_t *buf, size_t page_size, 
 {
     volatile size_t v_zero = 0u;
     volatile size_t v_off = offset + 1u;
-    uint8_t *p_wr = buf + v_zero;
+    uint8_t *p_wr = (uint8_t *)PAL_ASSUME_ALIGNED(buf + v_zero, 8u);
     const uint8_t *p_rd = buf + v_off;
     uint64_t val = UINT64_C(1);
     uint8_t loaded = 0u;
@@ -922,8 +922,8 @@ static PAL_NOINLINE uint64_t core_stlf_alias(uint8_t *buf, size_t page_size, uin
 {
     volatile size_t v_zero = 0u;
     volatile size_t v_page = page_size + offset;
-    uint8_t *p_wr = buf + v_zero;
-    const uint8_t *p_rd = buf + v_page;
+    uint8_t *p_wr = (uint8_t *)PAL_ASSUME_ALIGNED(buf + v_zero, 8u);
+    const uint8_t *p_rd = (const uint8_t *)PAL_ASSUME_ALIGNED(buf + v_page, 8u);
     uint64_t val = UINT64_C(1);
     uint64_t loaded = 0u;
     uint64_t i = 0u;
@@ -984,8 +984,8 @@ lb_status_t core_stlf_run(const lb_cfg_t *cfg)
     repeats = cfg->fast ? CORE_FAST_REPEATS : CORE_STLF_REPEATS;
 
     page_size = pal_page_size();
-    if (page_size == 0u) {
-        tty_err("cannot determine the system page size");
+    if (page_size == 0u || (page_size % 8u) != 0u) {
+        tty_err("cannot determine a usable system page size");
         return LB_STATUS_UNSUPPORTED;
     }
     if (page_size > (SIZE_MAX / 3u)) {
