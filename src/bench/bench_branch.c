@@ -36,9 +36,9 @@
 #define BR_RSB_ITERATIONS UINT64_C(200000)
 #define BR_RSB_WARMUP UINT64_C(20000)
 #define BR_RSB_REPEATS 3u
-#define BR_RSB_JUMP_PCT 15.0
-#define BR_RSB_SUSTAIN_PCT 12.0
-#define BR_RSB_SMALL_DEPTH 16u
+#define BR_RSB_JUMP_PCT 30.0
+#define BR_RSB_SUSTAIN_PCT 25.0
+#define BR_RSB_SMALL_DEPTH 32u
 #define BR_RSB_DEPTH_COUNT 12u
 
 /* branch btb: indirect calls through a table of unique trampolines. */
@@ -325,16 +325,42 @@ lb_status_t br_hist_run(const lb_cfg_t *cfg)
 
 /* -------------------------------------------------------------- branch rsb */
 
-static PAL_NOINLINE uint64_t br_rsb_recurse(uint64_t depth, uint64_t acc)
-{
-    uint64_t value = acc + depth;
+/*
+ * Seven distinct functions in a prime-length call ring. A single
+ * self-recursive function pushes the same return PC onto every frame, so a
+ * circular RAS without underflow tracking keeps predicting hits past overflow.
+ * A prime ring length defeats wrap-around aliasing on every common RAS depth.
+ */
+#define BR_RSB_DECL(idx) static PAL_NOINLINE uint64_t br_rsb_f##idx(uint64_t depth, uint64_t acc);
 
-    if (depth > 0u) {
-        value = br_rsb_recurse(depth - 1u, value);
+#define BR_RSB_DEF(idx, next_idx)                                                                  \
+    static PAL_NOINLINE uint64_t br_rsb_f##idx(uint64_t depth, uint64_t acc)                       \
+    {                                                                                              \
+        const uint64_t salt = (uint64_t)(idx) + UINT64_C(1);                                       \
+        uint64_t value = acc + depth + salt;                                                       \
+                                                                                                   \
+        if (depth > 0u) {                                                                          \
+            value = br_rsb_f##next_idx(depth - 1u, value);                                         \
+        }                                                                                          \
+        /* Dependent use after the call defeats tail-call elimination. */                          \
+        return value ^ (depth + salt);                                                             \
     }
-    /* Dependent use after the call defeats tail-call elimination. */
-    return value ^ depth;
-}
+
+BR_RSB_DECL(0)
+BR_RSB_DECL(1)
+BR_RSB_DECL(2)
+BR_RSB_DECL(3)
+BR_RSB_DECL(4)
+BR_RSB_DECL(5)
+BR_RSB_DECL(6)
+
+BR_RSB_DEF(0, 1)
+BR_RSB_DEF(1, 2)
+BR_RSB_DEF(2, 3)
+BR_RSB_DEF(3, 4)
+BR_RSB_DEF(4, 5)
+BR_RSB_DEF(5, 6)
+BR_RSB_DEF(6, 0)
 
 static PAL_NOINLINE uint64_t br_rsb_walk(br_rsb_fn_t volatile *entry, uint64_t depth,
                                          uint64_t iterations)
@@ -389,7 +415,7 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
 
     lb_bench_apply_runtime(cfg);
 
-    g_br_rsb_entry = br_rsb_recurse;
+    g_br_rsb_entry = br_rsb_f0;
     PAL_BARRIER();
 
     tty_csv_row(cfg, "branch,rsb,depth,ns_per_call,delta_pct");

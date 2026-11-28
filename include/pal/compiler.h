@@ -43,6 +43,16 @@ typedef uint8_t pal_unaligned_u8_t;
 #endif
 
 /*
+ * Hint minimum alignment in bytes to the optimizer. Only use on pointers that
+ * genuinely satisfy that alignment at runtime, or UBSan checks will fail.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#define PAL_ASSUME_ALIGNED(ptr, align) __builtin_assume_aligned((ptr), (align))
+#else
+#define PAL_ASSUME_ALIGNED(ptr, align) (ptr)
+#endif
+
+/*
  * Portable printf-style format checking for variadic wrappers. Pass the
  * one-based index of the format string and of the first variadic argument, or
  * zero as the second index for a va_list parameter.
