@@ -36,9 +36,9 @@
 #define BR_RSB_ITERATIONS UINT64_C(200000)
 #define BR_RSB_WARMUP UINT64_C(20000)
 #define BR_RSB_REPEATS 3u
-#define BR_RSB_JUMP_PCT 15.0
-#define BR_RSB_SUSTAIN_PCT 12.0
-#define BR_RSB_SMALL_DEPTH 16u
+#define BR_RSB_JUMP_PCT 30.0
+#define BR_RSB_SUSTAIN_PCT 25.0
+#define BR_RSB_SMALL_DEPTH 32u
 #define BR_RSB_DEPTH_COUNT 12u
 
 /* branch btb: indirect calls through a table of unique trampolines. */
@@ -325,16 +325,42 @@ lb_status_t br_hist_run(const lb_cfg_t *cfg)
 
 /* -------------------------------------------------------------- branch rsb */
 
-static PAL_NOINLINE uint64_t br_rsb_recurse(uint64_t depth, uint64_t acc)
-{
-    uint64_t value = acc + depth;
+/*
+ * Seven distinct functions in a prime-length call ring. A single
+ * self-recursive function pushes the same return PC onto every frame, so a
+ * circular RAS without underflow tracking keeps predicting hits past overflow.
+ * A prime ring length defeats wrap-around aliasing on every common RAS depth.
+ */
+#define BR_RSB_DECL(idx) static PAL_NOINLINE uint64_t br_rsb_f##idx(uint64_t depth, uint64_t acc);
 
-    if (depth > 0u) {
-        value = br_rsb_recurse(depth - 1u, value);
+#define BR_RSB_DEF(idx, next_idx)                                                                  \
+    static PAL_NOINLINE uint64_t br_rsb_f##idx(uint64_t depth, uint64_t acc)                       \
+    {                                                                                              \
+        const uint64_t salt = (uint64_t)(idx) + UINT64_C(1);                                       \
+        uint64_t value = acc + depth + salt;                                                       \
+                                                                                                   \
+        if (depth > 0u) {                                                                          \
+            value = br_rsb_f##next_idx(depth - 1u, value);                                         \
+        }                                                                                          \
+        /* Dependent use after the call defeats tail-call elimination. */                          \
+        return value ^ (depth + salt);                                                             \
     }
-    /* Dependent use after the call defeats tail-call elimination. */
-    return value ^ depth;
-}
+
+BR_RSB_DECL(0)
+BR_RSB_DECL(1)
+BR_RSB_DECL(2)
+BR_RSB_DECL(3)
+BR_RSB_DECL(4)
+BR_RSB_DECL(5)
+BR_RSB_DECL(6)
+
+BR_RSB_DEF(0, 1)
+BR_RSB_DEF(1, 2)
+BR_RSB_DEF(2, 3)
+BR_RSB_DEF(3, 4)
+BR_RSB_DEF(4, 5)
+BR_RSB_DEF(5, 6)
+BR_RSB_DEF(6, 0)
 
 static PAL_NOINLINE uint64_t br_rsb_walk(br_rsb_fn_t volatile *entry, uint64_t depth,
                                          uint64_t iterations)
@@ -368,6 +394,61 @@ static double br_rsb_sample(uint64_t depth, uint64_t iterations)
     return (double)(end - begin) / (double)calls;
 }
 
+bool br_rsb_detect_threshold(const uint64_t *depths, const double *ns_per_call, size_t count,
+                             size_t *base_index_out, size_t *threshold_index_out)
+{
+    double base_ns = 0.0;
+    size_t base_index = 0u;
+    size_t index = 0u;
+
+    if (base_index_out != NULL) {
+        *base_index_out = 0u;
+    }
+    if (threshold_index_out != NULL) {
+        *threshold_index_out = 0u;
+    }
+    if (depths == NULL || ns_per_call == NULL || count < 2u) {
+        return false;
+    }
+
+    /*
+     * The shallow depths carry call-entry overhead that can dwarf the RSB miss
+     * on some cores, so the baseline is the cheapest shallow depth rather than
+     * a fixed depth == 4 reading.
+     */
+    base_ns = ns_per_call[0];
+    for (index = 0u; index < count; index++) {
+        if (depths[index] <= BR_RSB_SMALL_DEPTH && ns_per_call[index] < base_ns) {
+            base_ns = ns_per_call[index];
+            base_index = index;
+        }
+    }
+    if (base_index_out != NULL) {
+        *base_index_out = base_index;
+    }
+    if (!(base_ns > 0.0)) {
+        return false;
+    }
+
+    for (index = 0u; index < count; index++) {
+        /*
+         * A real RSB overflow is persistent: the next depth must stay above the
+         * sustain threshold. Only depths above the chosen baseline can overflow
+         * the RSB; comparing a shallower depth against a deeper baseline would
+         * report a false threshold.
+         */
+        if (index > base_index && (index + 1u) < count &&
+            ns_per_call[index] >= (base_ns * (1.0 + (BR_RSB_JUMP_PCT / 100.0))) &&
+            ns_per_call[index + 1u] >= (base_ns * (1.0 + (BR_RSB_SUSTAIN_PCT / 100.0)))) {
+            if (threshold_index_out != NULL) {
+                *threshold_index_out = index;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 lb_status_t br_rsb_run(const lb_cfg_t *cfg)
 {
     double ns_per_call[BR_RSB_DEPTH_COUNT] = {0.0};
@@ -389,7 +470,7 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
 
     lb_bench_apply_runtime(cfg);
 
-    g_br_rsb_entry = br_rsb_recurse;
+    g_br_rsb_entry = br_rsb_f0;
     PAL_BARRIER();
 
     tty_csv_row(cfg, "branch,rsb,depth,ns_per_call,delta_pct");
@@ -414,18 +495,9 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
         ns_per_call[index] = stats_percentile(samples, repeats, STATS_NOISE_PERCENTILE);
     }
 
-    /*
-     * The shallow depths carry call-entry overhead that can dwarf the RSB miss
-     * on some cores, so the baseline is the cheapest shallow depth rather than
-     * a fixed depth == 4 reading.
-     */
-    base_ns = ns_per_call[0];
-    for (index = 0u; index < BR_RSB_DEPTH_COUNT; index++) {
-        if (BR_RSB_DEPTHS[index] <= BR_RSB_SMALL_DEPTH && ns_per_call[index] < base_ns) {
-            base_ns = ns_per_call[index];
-            base_index = index;
-        }
-    }
+    threshold_found = br_rsb_detect_threshold(BR_RSB_DEPTHS, ns_per_call, BR_RSB_DEPTH_COUNT,
+                                              &base_index, &threshold_index);
+    base_ns = ns_per_call[base_index];
 
     for (index = 0u; index < BR_RSB_DEPTH_COUNT; index++) {
         const uint64_t depth = BR_RSB_DEPTHS[index];
@@ -433,19 +505,6 @@ lb_status_t br_rsb_run(const lb_cfg_t *cfg)
 
         if (base_ns > 0.0) {
             delta_pct = ((ns_per_call[index] - base_ns) / base_ns) * 100.0;
-        }
-        /*
-         * A real RSB overflow is persistent: the next depth must stay above the
-         * sustain threshold. A single spike (depth 8 on Cortex-A715) no longer
-         * produces a false ~4-frame capacity. Only depths above the chosen
-         * baseline can overflow the RSB; comparing a shallower depth against a
-         * baseline measured at a deeper one would report a false threshold.
-         */
-        if (!threshold_found && index > base_index && (index + 1u) < BR_RSB_DEPTH_COUNT &&
-            ns_per_call[index] >= (base_ns * (1.0 + (BR_RSB_JUMP_PCT / 100.0))) &&
-            ns_per_call[index + 1u] >= (base_ns * (1.0 + (BR_RSB_SUSTAIN_PCT / 100.0)))) {
-            threshold_found = true;
-            threshold_index = index;
         }
 
         tty_header(cfg, "  %7" PRIu64 " %14" PRIu64 " %12.4f %9.1f%%", depth, depth + 1u,

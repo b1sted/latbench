@@ -2,7 +2,9 @@
 #ifndef LB_BENCH_H
 #define LB_BENCH_H
 
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "types.h"
 
@@ -93,5 +95,15 @@ lb_status_t os_fork_run(const lb_cfg_t *cfg);
 lb_status_t os_sig_run(const lb_cfg_t *cfg);
 lb_status_t os_sleep_run(const lb_cfg_t *cfg);
 lb_status_t os_swap_run(const lb_cfg_t *cfg);
+
+/*
+ * Pure estimator helpers exported for unit testing. They return zero or false
+ * on invalid or flat inputs without performing I/O.
+ */
+size_t mem_line_estimate_p10(const double *p10_ns, const size_t *steps, size_t count);
+size_t mem_assoc_knee(const double *row, size_t limit, double *ratio_out);
+bool br_rsb_detect_threshold(const uint64_t *depths, const double *ns_per_call, size_t count,
+                             size_t *base_index_out, size_t *threshold_index_out);
+uint32_t topo_fs_estimate_line_offsets(const size_t *offsets, const double *samples, size_t count);
 
 #endif /* LB_BENCH_H */

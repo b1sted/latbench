@@ -11,6 +11,7 @@
 
 /* Capture files live in the working directory so the test binary is portable. */
 #define TEST_CAPTURE_CSV "test_auto_capture.csv"
+#define TEST_CAPTURE_TTY "test_auto_capture.out"
 #define TEST_CAPTURE_SIZE 16384u
 #define TEST_CSV_COLUMNS 5u
 #define TEST_CSV_HEADER "module,subtest,metric,value,unit\n"
@@ -115,7 +116,7 @@ static bool csv_has_single_header(const char *text)
     return second == NULL;
 }
 
-int main(void)
+static int test_auto_csv(void)
 {
     lb_cfg_t cfg = {0};
     lb_status_t status = LB_STATUS_ERROR;
@@ -217,6 +218,66 @@ int main(void)
     }
 
     (void)remove(TEST_CAPTURE_CSV);
+    return failures;
+}
+
+static int test_auto_tty(void)
+{
+    lb_cfg_t cfg = {0};
+    lb_status_t status = LB_STATUS_ERROR;
+    char output[TEST_CAPTURE_SIZE] = {0};
+    int failures = 0;
+    bool captured = false;
+
+    cfg.cpu_id = -1;
+    cfg.batch_ms = 1u;
+    cfg.max_mem_mb = 4u;
+    cfg.no_thp = true;
+    cfg.csv = false;
+    cfg.quiet = false;
+    cfg.no_color = true;
+    cfg.suppress_drift_warn = true;
+    cfg.os_ctx_mode = LB_OS_CTX_BOTH;
+
+    captured = capture_start(TEST_CAPTURE_TTY);
+    status = lb_auto_run(&cfg);
+    if (!captured) {
+        fprintf(stderr, "FAIL: cannot capture auto TTY stdout\n");
+        failures++;
+    } else {
+        (void)capture_read(TEST_CAPTURE_TTY, output, sizeof(output));
+    }
+
+    if (status != LB_STATUS_OK) {
+        fprintf(stderr, "FAIL: lb_auto_run(TTY) returned status %d\n", (int)status);
+        failures++;
+    }
+    if (captured) {
+        if (strstr(output, "Passport:") == NULL) {
+            fprintf(stderr, "FAIL: auto TTY output lacks Passport heading\n");
+            failures++;
+        }
+        if (strstr(output, "Logical CPUs") == NULL || strstr(output, "RAM lat") == NULL) {
+            fprintf(stderr, "FAIL: auto TTY output lacks expected Passport fields\n");
+            failures++;
+        }
+        if (strstr(output, "auto: sys info") != NULL) {
+            fprintf(stderr, "FAIL: auto TTY leaked progress lines onto stdout\n");
+            failures++;
+        }
+        if (strstr(output, "\x1b") != NULL) {
+            fprintf(stderr, "FAIL: auto TTY emitted ANSI escapes with no_color\n");
+            failures++;
+        }
+    }
+
+    (void)remove(TEST_CAPTURE_TTY);
+    return failures;
+}
+
+int main(void)
+{
+    const int failures = test_auto_csv() + test_auto_tty();
     fprintf(stderr, "test_auto: %s\n", (failures == 0) ? "ok" : "FAILED");
     return (failures == 0) ? 0 : 1;
 }

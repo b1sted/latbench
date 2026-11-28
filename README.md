@@ -237,13 +237,13 @@ it locally:
 
 ```bash
 # Debian / Ubuntu
-sudo apt install ./latbench_0.2.0_*.deb
+sudo apt install ./latbench_0.2.1_*.deb
 
 # Fedora / RHEL / openSUSE
-sudo dnf install ./latbench-0.2.0.*.rpm
+sudo dnf install ./latbench-0.2.1.*.rpm
 
 # Arch Linux
-sudo pacman -U ./latbench-0.2.0-*.pkg.tar.zst
+sudo pacman -U ./latbench-0.2.1-*.pkg.tar.zst
 ```
 
 </details>
@@ -273,7 +273,7 @@ confused with the native Linux packages, while the installed package name is
 `latbench`:
 
 ```bash
-pkg install ./latbench-termux_0.2.0_*.deb
+pkg install ./latbench-termux_0.2.1_*.deb
 ```
 
 </details>
@@ -372,7 +372,7 @@ The full option list:
 
 ```bash
 ./build/bin/latbench -V
-# latbench v0.2.0 (x86_64)
+# latbench v0.2.1 (x86_64)
 ```
 
 `make test` runs the unit tests and then executes `./build/bin/latbench selftest`

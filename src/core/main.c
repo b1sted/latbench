@@ -9,6 +9,7 @@
 
 #include "auto.h"
 #include "bench.h"
+#include "cli.h"
 #include "defs.h"
 #include "pal/compiler.h"
 #include "pal/pal.h"
@@ -17,10 +18,8 @@
 #include "util.h"
 
 #ifndef LB_VERSION
-#define LB_VERSION "0.2.0"
+#define LB_VERSION "0.2.1"
 #endif
-#define LB_DEFAULT_BATCH_MS 20u
-#define LB_DEFAULT_COOL_MS 0u
 
 #define LB_SELFTEST_MAX_NODES 4096u
 #define LB_SELFTEST_CHAIN_NODES 4096u
@@ -59,120 +58,6 @@ static volatile uint64_t g_lb_selftest_sink = 0u;
 
 /* Branch-pattern storage shared by the constant and 50/50 sanity walks. */
 static uint8_t g_lb_selftest_branch_pattern[LB_SELFTEST_BRANCH_PATTERN_BYTES] = {0};
-
-static const lb_subtest_t SYS_SUBTESTS[] = {
-    {"info", "platform limits and runtime settings", sys_info_run},
-    {"timer", "clock resolution and pal_now_ns() overhead", sys_timer_run},
-    {"throttle", "5-10 s sustained-load turbo and throttle decay", sys_throttle_run},
-};
-
-static const lb_subtest_t MEM_SUBTESTS[] = {
-    {"size", "cache size from random pointer-chase latency", mem_size_run},
-    {"line", "cache line size from stride latency", mem_line_run},
-    {"assoc", "cache associativity from a set-conflict scan", mem_assoc_run},
-    {"prefetch", "sequential, strided, and random prefetcher probes", mem_prefetch_run},
-};
-
-static const lb_subtest_t TLB_SUBTESTS[] = {
-    {"size", "TLB capacity from a randomized page pointer chase", tlb_size_run},
-    {"fault", "first-touch page-fault latency versus a warm second pass", tlb_fault_run},
-};
-
-static const lb_subtest_t CORE_SUBTESTS[] = {
-    {"ilp", "dependent-chain throughput for ALU and FPU execution ports", core_ilp_run},
-    {"mlp", "parallel pointer-chase throughput and memory-level parallelism", core_mlp_run},
-    {"align", "unaligned read latency inside and across a cache line", core_align_run},
-    {"stlf", "store-to-load forwarding latency and 4K aliasing", core_stlf_run},
-};
-
-static const lb_subtest_t BRANCH_SUBTESTS[] = {
-    {"hist", "predictor history and mispredict penalty from branch patterns", br_hist_run},
-    {"rsb", "return-stack buffer capacity from recursive call chains", br_rsb_run},
-    {"btb", "BTB and L1i capacity from indirect-call trampolines", br_btb_run},
-};
-
-static const lb_subtest_t DRAM_SUBTESTS[] = {
-    {"bw", "sequential read, write, and copy bandwidth", dram_bw_run},
-    {"row", "DRAM row-buffer locality versus random page switches", dram_row_run},
-    {"lat", "pure DRAM latency (THP) versus 4 KiB page-walk penalty", dram_lat_run},
-};
-
-static const lb_subtest_t TOPO_SUBTESTS[] = {
-    {"atomic", "uncontended atomic fetch-add and sequential fence cost", topo_atomic_run},
-    {"falseshare", "two-core false sharing versus counter byte offset", topo_falseshare_run},
-    {"pingpong", "core-to-core token ping-pong one-way latency (RTT/2)", topo_pingpong_run},
-};
-
-static const lb_subtest_t OS_SUBTESTS[] = {
-    {"syscall", "userland timer versus a guaranteed kernel write() transition", os_syscall_run},
-    {"ctx", "thread or process context switch over a pipe ping-pong", os_ctx_run},
-    {"wakeup", "scheduler wakeup cost with mutex and condition variable", os_wakeup_run},
-    {"shootdown", "mprotect TLB shootdown cost, single and multi-thread", os_shootdown_run},
-    {"fork", "fork, child _exit(0), and parent waitpid cost", os_fork_run},
-    {"sig", "self-delivered SIGUSR1 signal round trip", os_sig_run},
-    {"sleep", "nanosleep overshoot at 1 us and 100 us targets", os_sleep_run},
-    {"swap", "pageout via MADV_PAGEOUT and random swap-in fault latency", os_swap_run},
-};
-
-static const lb_module_t BENCH_MODULES[] = {
-    {"sys", "system calibration and clock diagnostics", SYS_SUBTESTS, LB_ARRAY_SIZE(SYS_SUBTESTS)},
-    {"mem", "cache size, line, associativity, and prefetcher probes", MEM_SUBTESTS,
-     LB_ARRAY_SIZE(MEM_SUBTESTS)},
-    {"tlb", "TLB capacity and page-fault latency", TLB_SUBTESTS, LB_ARRAY_SIZE(TLB_SUBTESTS)},
-    {"core", "pipeline ILP, MLP, alignment, and store-forwarding probes", CORE_SUBTESTS,
-     LB_ARRAY_SIZE(CORE_SUBTESTS)},
-    {"branch", "branch predictor, RSB, and BTB capacity probes", BRANCH_SUBTESTS,
-     LB_ARRAY_SIZE(BRANCH_SUBTESTS)},
-    {"dram", "memory bandwidth and DRAM row-buffer locality", DRAM_SUBTESTS,
-     LB_ARRAY_SIZE(DRAM_SUBTESTS)},
-    {"topo", "core-to-core atomics, false sharing, and ping-pong", TOPO_SUBTESTS,
-     LB_ARRAY_SIZE(TOPO_SUBTESTS)},
-    {"os", "syscall, context switch, shootdown, fork, signal, and sleep probes", OS_SUBTESTS,
-     LB_ARRAY_SIZE(OS_SUBTESTS)},
-};
-
-const lb_module_t *lb_bench_modules(size_t *count)
-{
-    if (count != NULL) {
-        *count = LB_ARRAY_SIZE(BENCH_MODULES);
-    }
-    return BENCH_MODULES;
-}
-
-static const lb_module_t *find_module(const char *name)
-{
-    const lb_module_t *modules = NULL;
-    size_t count = 0u;
-    size_t i = 0u;
-
-    modules = lb_bench_modules(&count);
-    if (name == NULL) {
-        return NULL;
-    }
-
-    for (i = 0u; i < count; i++) {
-        if (strcmp(modules[i].name, name) == 0) {
-            return &modules[i];
-        }
-    }
-    return NULL;
-}
-
-static const lb_subtest_t *find_subtest(const lb_module_t *module, const char *name)
-{
-    size_t i = 0u;
-
-    if (module == NULL || name == NULL) {
-        return NULL;
-    }
-
-    for (i = 0u; i < module->subtest_count; i++) {
-        if (strcmp(module->subtests[i].name, name) == 0) {
-            return &module->subtests[i];
-        }
-    }
-    return NULL;
-}
 
 static bool lb_selftest_sattolo_check(const lb_cfg_t *cfg)
 {
@@ -730,262 +615,16 @@ static void print_module_help_to_stderr(const lb_cfg_t *cfg, const lb_module_t *
     print_module_help(&err_cfg, module);
 }
 
-/*
- * --mode is subtest-specific. "cas"/"flag" belong to topo pingpong and
- * "thread"/"proc" belong to os ctx; every other command rejects the option so a
- * typo cannot silently select a value that the probe never reads.
- */
-static bool mode_is_valid_for_subtest(const char *module, const char *subtest, bool mode_is_topo)
-{
-    if (module == NULL || subtest == NULL) {
-        return false;
-    }
-    if (strcmp(module, "topo") == 0 && strcmp(subtest, "pingpong") == 0) {
-        return mode_is_topo;
-    }
-    if (strcmp(module, "os") == 0 && strcmp(subtest, "ctx") == 0) {
-        return !mode_is_topo;
-    }
-    return false;
-}
-
-static lb_status_t parse_u32_option(const char *option, const char *text, uint32_t *out)
-{
-    uint64_t value = 0u;
-
-    if (util_parse_u64(text, &value) != LB_STATUS_OK || value > (uint64_t)UINT32_MAX) {
-        tty_err("invalid value for %s: '%s'", option, text);
-        return LB_STATUS_INVALID_ARG;
-    }
-
-    *out = (uint32_t)value;
-    return LB_STATUS_OK;
-}
-
-static lb_status_t parse_cpu_option(const char *text, int32_t *out)
-{
-    int32_t value = 0;
-    const lb_status_t status = util_parse_i32(text, &value);
-
-    if (status != LB_STATUS_OK || value < 0) {
-        tty_err("invalid value for --cpu: '%s'", text);
-        return LB_STATUS_INVALID_ARG;
-    }
-
-    *out = value;
-    return LB_STATUS_OK;
-}
-
-static lb_status_t parse_qos_option(const char *text, lb_cfg_t *cfg)
-{
-    if (strcmp(text, "perf") == 0) {
-        cfg->qos_perf = true;
-    } else if (strcmp(text, "bg") == 0) {
-        cfg->qos_perf = false;
-    } else {
-        tty_err("invalid value for --qos: '%s' (expected perf or bg)", text);
-        return LB_STATUS_INVALID_ARG;
-    }
-
-    cfg->qos_set = true;
-    return LB_STATUS_OK;
-}
-
-static lb_status_t parse_args(int argc, char **argv, lb_cfg_t *cfg, bool *show_help,
-                              bool *show_version, bool *mode_set, bool *mode_is_topo,
-                              const char **module_name, const char **subtest_name)
-{
-    const char *positionals[2] = {NULL, NULL};
-    int positional_count = 0;
-    int i = 0;
-    bool threads_set = false;
-
-    *mode_set = false;
-    *mode_is_topo = false;
-
-    for (i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-
-        /*
-         * Keep scanning after --help so a later --no-color still reaches the
-         * renderer. Help output is printed after parsing completes.
-         */
-        if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
-            *show_help = true;
-            continue;
-        }
-        if (strcmp(arg, "-V") == 0 || strcmp(arg, "--version") == 0) {
-            *show_version = true;
-            return LB_STATUS_OK;
-        }
-        if (strcmp(arg, "--no-color") == 0) {
-            cfg->no_color = true;
-            tty_set_no_color(true);
-            continue;
-        }
-        if (strcmp(arg, "--csv") == 0) {
-            cfg->csv = true;
-            continue;
-        }
-        if (strcmp(arg, "--no-thp") == 0) {
-            cfg->no_thp = true;
-            cfg->thp_set = true;
-            continue;
-        }
-        if (strcmp(arg, "--thp") == 0) {
-            cfg->no_thp = false;
-            cfg->thp_set = true;
-            continue;
-        }
-        if (strcmp(arg, "--write") == 0) {
-            cfg->write = true;
-            continue;
-        }
-        if (strcmp(arg, "--long") == 0) {
-            cfg->throttle_long = true;
-            continue;
-        }
-        if (strcmp(arg, "--no-timing") == 0) {
-            cfg->selftest_no_timing = true;
-            continue;
-        }
-        if (strcmp(arg, "--mode") == 0) {
-            if (i + 1 >= argc) {
-                tty_err("option %s requires a value", arg);
-                return LB_STATUS_INVALID_ARG;
-            }
-            i++;
-            if (strcmp(argv[i], "cas") == 0) {
-                cfg->topo_pingpong_cas = true;
-                *mode_set = true;
-                *mode_is_topo = true;
-            } else if (strcmp(argv[i], "flag") == 0) {
-                cfg->topo_pingpong_cas = false;
-                *mode_set = true;
-                *mode_is_topo = true;
-            } else if (strcmp(argv[i], "thread") == 0) {
-                cfg->os_ctx_mode = LB_OS_CTX_THREAD;
-                *mode_set = true;
-                *mode_is_topo = false;
-            } else if (strcmp(argv[i], "proc") == 0) {
-                cfg->os_ctx_mode = LB_OS_CTX_PROC;
-                *mode_set = true;
-                *mode_is_topo = false;
-            } else {
-                tty_err("invalid value for --mode: '%s' (expected cas, flag, thread, or proc)",
-                        argv[i]);
-                return LB_STATUS_INVALID_ARG;
-            }
-            continue;
-        }
-
-        if (strcmp(arg, "--cpu") == 0 || strcmp(arg, "--qos") == 0 ||
-            strcmp(arg, "--max-mem") == 0 || strcmp(arg, "--batch-ms") == 0 ||
-            strcmp(arg, "--cool-ms") == 0 || strcmp(arg, "--threads") == 0) {
-            const char *value = NULL;
-
-            if (i + 1 >= argc) {
-                tty_err("option %s requires a value", arg);
-                return LB_STATUS_INVALID_ARG;
-            }
-            i++;
-            value = argv[i];
-
-            if (strcmp(arg, "--cpu") == 0) {
-                if (parse_cpu_option(value, &cfg->cpu_id) != LB_STATUS_OK) {
-                    return LB_STATUS_INVALID_ARG;
-                }
-            } else if (strcmp(arg, "--qos") == 0) {
-                if (parse_qos_option(value, cfg) != LB_STATUS_OK) {
-                    return LB_STATUS_INVALID_ARG;
-                }
-            } else if (strcmp(arg, "--max-mem") == 0) {
-                if (parse_u32_option(arg, value, &cfg->max_mem_mb) != LB_STATUS_OK) {
-                    return LB_STATUS_INVALID_ARG;
-                }
-            } else if (strcmp(arg, "--batch-ms") == 0) {
-                if (parse_u32_option(arg, value, &cfg->batch_ms) != LB_STATUS_OK) {
-                    return LB_STATUS_INVALID_ARG;
-                }
-            } else if (strcmp(arg, "--threads") == 0) {
-                if (parse_u32_option(arg, value, &cfg->threads) != LB_STATUS_OK) {
-                    return LB_STATUS_INVALID_ARG;
-                }
-                if (cfg->threads == 0u) {
-                    tty_err("invalid value for --threads: '%s' (must be >= 1)", value);
-                    return LB_STATUS_INVALID_ARG;
-                }
-                threads_set = true;
-            } else {
-                if (parse_u32_option(arg, value, &cfg->cool_ms) != LB_STATUS_OK) {
-                    return LB_STATUS_INVALID_ARG;
-                }
-            }
-            continue;
-        }
-
-        if (arg[0] == '-') {
-            tty_err("unknown option '%s'", arg);
-            return LB_STATUS_INVALID_ARG;
-        }
-        if (positional_count >= 2) {
-            tty_err("unexpected argument '%s'", arg);
-            return LB_STATUS_INVALID_ARG;
-        }
-
-        positionals[positional_count] = arg;
-        positional_count++;
-    }
-
-    *module_name = positionals[0];
-    *subtest_name = positionals[1];
-
-    if (threads_set && !*show_help) {
-        if (positionals[0] == NULL || positionals[1] == NULL ||
-            strcmp(positionals[0], "dram") != 0 || strcmp(positionals[1], "bw") != 0) {
-            tty_err("--threads is only valid for 'dram bw'");
-            return LB_STATUS_INVALID_ARG;
-        }
-    }
-    return LB_STATUS_OK;
-}
-
 int main(int argc, char **argv)
 {
     lb_cfg_t cfg = {0};
-    bool show_help = false;
-    bool show_version = false;
-    bool mode_set = false;
-    bool mode_is_topo = false;
-    const char *module_name = NULL;
-    const char *subtest_name = NULL;
+    lb_cli_result_t cli = {0};
     const lb_module_t *module = NULL;
     const lb_subtest_t *subtest = NULL;
     lb_status_t status = LB_STATUS_OK;
 
-    cfg.cpu_id = -1;
-    cfg.qos_perf = false;
-    cfg.qos_set = false;
-    cfg.max_mem_mb = 0u;
-    cfg.batch_ms = LB_DEFAULT_BATCH_MS;
-    cfg.cool_ms = LB_DEFAULT_COOL_MS;
-    cfg.no_thp = true;
-    cfg.thp_set = false;
-    cfg.threads = 0u;
-    cfg.csv = false;
-    cfg.no_color = false;
-    cfg.write = false;
-    cfg.throttle_long = false;
-    cfg.topo_pingpong_cas = false;
-    cfg.selftest_no_timing = false;
-    cfg.fast = false;
-    cfg.auto_mode = false;
-    cfg.quiet = false;
-    cfg.runtime_applied = false;
-    cfg.os_ctx_mode = LB_OS_CTX_BOTH;
-
-    status = parse_args(argc, argv, &cfg, &show_help, &show_version, &mode_set, &mode_is_topo,
-                        &module_name, &subtest_name);
+    lb_cfg_init(&cfg);
+    status = lb_cli_parse(argc, argv, &cfg, &cli);
     if (status != LB_STATUS_OK) {
         print_help_to_stderr(&cfg);
         return 2;
@@ -993,13 +632,13 @@ int main(int argc, char **argv)
 
     tty_set_no_color(cfg.no_color);
 
-    if (show_version) {
+    if (cli.show_version) {
         tty_header(NULL, "latbench v%s (%s)", LB_VERSION, pal_arch_name());
         return 0;
     }
 
-    if (module_name == NULL) {
-        if (show_help || argc == 1) {
+    if (cli.module_name == NULL) {
+        if (cli.show_help || argc == 1) {
             print_help(&cfg);
             return 0;
         }
@@ -1008,34 +647,34 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    if (strcmp(module_name, "selftest") == 0) {
-        if (show_help) {
+    if (strcmp(cli.module_name, "selftest") == 0) {
+        if (cli.show_help) {
             print_command_help(&cfg, "selftest");
             return 0;
         }
-        if (subtest_name != NULL) {
+        if (cli.subtest_name != NULL) {
             tty_err("selftest does not take a subtest");
             print_help_to_stderr(&cfg);
             return 2;
         }
-        if (mode_set) {
+        if (cli.mode_set) {
             tty_err("--mode is not valid for selftest");
             return 2;
         }
         return (lb_selftest_run(&cfg) == LB_STATUS_OK) ? 0 : 1;
     }
 
-    if (strcmp(module_name, "auto") == 0) {
-        if (show_help) {
+    if (strcmp(cli.module_name, "auto") == 0) {
+        if (cli.show_help) {
             print_command_help(&cfg, "auto");
             return 0;
         }
-        if (subtest_name != NULL) {
+        if (cli.subtest_name != NULL) {
             tty_err("auto does not take a subtest");
             print_help_to_stderr(&cfg);
             return 2;
         }
-        if (mode_set) {
+        if (cli.mode_set) {
             tty_err("--mode is not valid for auto");
             return 2;
         }
@@ -1046,26 +685,26 @@ int main(int argc, char **argv)
         return (lb_auto_run(&cfg) == LB_STATUS_OK) ? 0 : 1;
     }
 
-    module = find_module(module_name);
+    module = lb_cli_find_module(cli.module_name);
     if (module == NULL) {
-        tty_err("unknown module '%s'", module_name);
+        tty_err("unknown module '%s'", cli.module_name);
         print_help_to_stderr(&cfg);
         return 2;
     }
 
-    if (show_help || subtest_name == NULL) {
+    if (cli.show_help || cli.subtest_name == NULL) {
         print_module_help(&cfg, module);
         return 0;
     }
 
-    subtest = find_subtest(module, subtest_name);
+    subtest = lb_cli_find_subtest(module, cli.subtest_name);
     if (subtest == NULL) {
-        tty_err("unknown subtest '%s' for module '%s'", subtest_name, module_name);
+        tty_err("unknown subtest '%s' for module '%s'", cli.subtest_name, cli.module_name);
         print_module_help_to_stderr(&cfg, module);
         return 2;
     }
 
-    if (mode_set && !mode_is_valid_for_subtest(module_name, subtest_name, mode_is_topo)) {
+    if (cli.mode_set && !lb_cli_mode_valid(cli.module_name, cli.subtest_name, cli.mode_is_topo)) {
         tty_err("--mode is only valid for 'topo pingpong' (cas|flag) and 'os ctx' "
                 "(thread|proc)");
         return 2;
@@ -1076,13 +715,14 @@ int main(int argc, char **argv)
         return 2;
     }
     if (subtest->run == NULL) {
-        tty_err("subtest '%s %s' is not implemented", module_name, subtest_name);
+        tty_err("subtest '%s %s' is not implemented", cli.module_name, cli.subtest_name);
         return 1;
     }
 
     status = subtest->run(&cfg);
     if (status != LB_STATUS_OK) {
-        tty_err("subtest '%s %s' failed (status %d)", module_name, subtest_name, (int)status);
+        tty_err("subtest '%s %s' failed (status %d)", cli.module_name, cli.subtest_name,
+                (int)status);
         return 1;
     }
 
