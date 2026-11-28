@@ -48,8 +48,8 @@ endif
 
 # Portable core sources are listed explicitly so link order stays deterministic.
 # Add new src/core/*.c files here as their modules are implemented.
-CORE_SRCS := src/core/main.c src/core/stats.c src/core/tty.c src/core/util.c \
-	src/core/auto.c src/core/passport.c
+CORE_SRCS := src/core/main.c src/core/cli.c src/core/stats.c src/core/tty.c \
+	src/core/util.c src/core/auto.c src/core/passport.c
 
 # Benchmark suites are listed explicitly so link order stays deterministic.
 # Add new src/bench/*.c files here as their modules are implemented.
