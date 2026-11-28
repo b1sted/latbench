@@ -18,7 +18,7 @@
 #include "util.h"
 
 #ifndef LB_VERSION
-#define LB_VERSION "0.2.0"
+#define LB_VERSION "0.2.1"
 #endif
 
 #define LB_SELFTEST_MAX_NODES 4096u

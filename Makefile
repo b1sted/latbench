@@ -19,7 +19,7 @@ SPDX_LICENSE ?= GPL-3.0
 
 UNAME_S := $(shell uname -s)
 
-VERSION ?= 0.2.0
+VERSION ?= 0.2.1
 CPPFLAGS ?=
 override CPPFLAGS += -DLB_VERSION=\"$(VERSION)\"
 LDFLAGS ?=
