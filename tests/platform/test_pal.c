@@ -524,6 +524,8 @@ static void test_os_swap(void)
 static void test_compiler_primitives(void)
 {
     const uint32_t values[4] = {1u, 2u, 3u, 4u};
+    uint64_t aligned[2] = {UINT64_C(0x1122334455667788), UINT64_C(0x99aabbccddeeff00)};
+    const uint64_t *aligned_ptr = (const uint64_t *)PAL_ASSUME_ALIGNED(aligned, 8u);
     uint64_t ticks = pal_now_ns();
     double scale = 1.5;
     uint32_t sum = 0u;
@@ -537,6 +539,8 @@ static void test_compiler_primitives(void)
     check_true(ticks != 0u, "PAL_KEEP_INT preserves a live value");
     check_true(scale > 0.0, "PAL_KEEP_FP preserves a live value");
     check_true(sum == 10u, "scalar sum helper stays correct");
+    check_true(aligned_ptr == aligned && aligned_ptr[1] == UINT64_C(0x99aabbccddeeff00),
+               "PAL_ASSUME_ALIGNED preserves pointer and values");
 }
 
 int main(void)

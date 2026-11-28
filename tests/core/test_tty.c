@@ -538,6 +538,38 @@ static void test_matrix_cpus_csv(void)
     }
 }
 
+static void test_format_helpers(void)
+{
+    char buf[64] = {0};
+
+    check_true(strcmp(tty_format_bytes(0u, buf, sizeof(buf)), "0 B") == 0,
+               "tty_format_bytes formats zero bytes");
+    check_true(strcmp(tty_format_bytes(512u, buf, sizeof(buf)), "512 B") == 0,
+               "tty_format_bytes formats sub-KiB bytes");
+    check_true(strcmp(tty_format_bytes(1024u, buf, sizeof(buf)), "1 KiB") == 0,
+               "tty_format_bytes formats exact KiB");
+    check_true(strcmp(tty_format_bytes(1536u, buf, sizeof(buf)), "1.5 KiB") == 0,
+               "tty_format_bytes formats fractional KiB");
+    check_true(
+        strcmp(tty_format_bytes(UINT64_C(2) * UINT64_C(1024) * UINT64_C(1024), buf, sizeof(buf)),
+               "2 MiB") == 0,
+        "tty_format_bytes formats MiB");
+    check_true(strcmp(tty_format_bytes(UINT64_C(3) << 30u, buf, sizeof(buf)), "3 GiB") == 0,
+               "tty_format_bytes formats GiB");
+    check_true(strcmp(tty_format_bytes(100u, NULL, 0u), "") == 0,
+               "tty_format_bytes rejects NULL buffer");
+
+    check_true(strcmp(tty_format_ns(42u, buf, sizeof(buf)), "42 ns") == 0,
+               "tty_format_ns formats nanoseconds");
+    check_true(strcmp(tty_format_ns(2500u, buf, sizeof(buf)), "2.50 us") == 0,
+               "tty_format_ns formats microseconds");
+    check_true(strcmp(tty_format_ns(1500000u, buf, sizeof(buf)), "1.50 ms") == 0,
+               "tty_format_ns formats milliseconds");
+    check_true(strcmp(tty_format_ns(UINT64_C(2500000000), buf, sizeof(buf)), "2.50 s") == 0,
+               "tty_format_ns formats seconds");
+    check_true(strcmp(tty_format_ns(100u, NULL, 0u), "") == 0, "tty_format_ns rejects NULL buffer");
+}
+
 int main(void)
 {
     test_plot_rejects_null_series();
@@ -551,6 +583,7 @@ int main(void)
     test_matrix_csv();
     test_matrix_cpus_table();
     test_matrix_cpus_csv();
+    test_format_helpers();
 
     if (g_stdout_captured) {
         (void)fflush(stdout);

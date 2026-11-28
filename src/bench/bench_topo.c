@@ -306,7 +306,8 @@ static uint32_t topo_fs_map_line(size_t offset)
     return 128u;
 }
 
-static uint32_t topo_fs_estimate_plateau_drop(const double *samples, size_t count)
+static uint32_t topo_fs_estimate_plateau_drop(const size_t *offsets, const double *samples,
+                                              size_t count)
 {
     size_t i = 0u;
 
@@ -317,7 +318,7 @@ static uint32_t topo_fs_estimate_plateau_drop(const double *samples, size_t coun
         double max_high = samples[i];
         size_t j = 0u;
 
-        if (TOPO_FS_OFFSETS[i] < 32u || TOPO_FS_OFFSETS[i] > 128u) {
+        if (offsets[i] < 32u || offsets[i] > 128u) {
             continue;
         }
         for (j = 1u; j < i; j++) {
@@ -344,18 +345,18 @@ static uint32_t topo_fs_estimate_plateau_drop(const double *samples, size_t coun
             continue;
         }
         if (min_low >= (max_high + 2.0) && max_high <= (min_low * 0.95)) {
-            return topo_fs_map_line(TOPO_FS_OFFSETS[i]);
+            return topo_fs_map_line(offsets[i]);
         }
     }
     return 0u;
 }
 
-static uint32_t topo_fs_estimate_line(const double *samples, size_t count)
+uint32_t topo_fs_estimate_line_offsets(const size_t *offsets, const double *samples, size_t count)
 {
     double best = 0.0;
     size_t i = 0u;
 
-    if (samples == NULL || count == 0u || !(samples[0] > 0.0)) {
+    if (offsets == NULL || samples == NULL || count == 0u || !(samples[0] > 0.0)) {
         return 0u;
     }
 
@@ -368,7 +369,7 @@ static uint32_t topo_fs_estimate_line(const double *samples, size_t count)
 
     /* Require a real drop before claiming a coherence-line boundary. */
     if (!(best < samples[0] * 0.8)) {
-        return topo_fs_estimate_plateau_drop(samples, count);
+        return topo_fs_estimate_plateau_drop(offsets, samples, count);
     }
 
     /*
@@ -382,7 +383,7 @@ static uint32_t topo_fs_estimate_line(const double *samples, size_t count)
         size_t j = 0u;
         bool plateau = true;
 
-        if (TOPO_FS_OFFSETS[i] < 32u) {
+        if (offsets[i] < 32u) {
             continue;
         }
         if (!(samples[i] <= plateau_limit)) {
@@ -397,9 +398,14 @@ static uint32_t topo_fs_estimate_line(const double *samples, size_t count)
         if (!plateau) {
             continue;
         }
-        return topo_fs_map_line(TOPO_FS_OFFSETS[i]);
+        return topo_fs_map_line(offsets[i]);
     }
     return 0u;
+}
+
+static uint32_t topo_fs_estimate_line(const double *samples, size_t count)
+{
+    return topo_fs_estimate_line_offsets(TOPO_FS_OFFSETS, samples, count);
 }
 
 /*
@@ -481,7 +487,8 @@ static bool topo_fs_has_drop(const double *samples, size_t count)
             best = samples[i];
         }
     }
-    return (best < (samples[0] * 0.8)) || (topo_fs_estimate_plateau_drop(samples, count) != 0u);
+    return (best < (samples[0] * 0.8)) ||
+           (topo_fs_estimate_plateau_drop(TOPO_FS_OFFSETS, samples, count) != 0u);
 }
 
 /*

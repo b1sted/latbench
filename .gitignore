@@ -14,6 +14,8 @@
 /test_tty_capture.out
 /test_tty_capture.csv
 /test_auto_capture.csv
+/test_auto_capture.out
+/test_cli_capture.err
 
 # Generated benchmark reports stay local and are never committed.
 /latbench-*.txt
